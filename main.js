@@ -409,8 +409,29 @@ class VaultGuardPlugin extends obsidian.Plugin {
             const currentFiles = this.app.vault.getFiles();
             const currentPaths = new Set(currentFiles.map(f => f.path.toLowerCase()));
             const currentNames = new Set(currentFiles.map(f => f.name.toLowerCase()));
-            const currentBasenames = new Set(currentFiles.map(f => f.basename.toLowerCase()));
-            const currentSizes = new Set(currentFiles.map(f => (f.stat ? f.stat.size : 0)).filter(s => s > 0));
+
+            // Build a Map of basename -> Set of extensions present in vault (for precise basename matching)
+            const currentBasenameExtMap = new Map();
+            for (const f of currentFiles) {
+                const bn = f.basename ? f.basename.toLowerCase() : "";
+                const ext = f.extension ? f.extension.toLowerCase() : "";
+                if (bn) {
+                    if (!currentBasenameExtMap.has(bn)) {
+                        currentBasenameExtMap.set(bn, new Set());
+                    }
+                    currentBasenameExtMap.get(bn).add(ext);
+                }
+            }
+
+            // Build a Set of paths that existed in previous snapshot (for MOC link graph cross-check)
+            const previousSnapshotPaths = new Set();
+            const previousSnapshotNames = new Set();
+            if (previousSnapshot && previousSnapshot.length > 0) {
+                for (const prev of previousSnapshot) {
+                    if (prev.path) previousSnapshotPaths.add(prev.path.toLowerCase());
+                    if (prev.name) previousSnapshotNames.add(prev.name.toLowerCase());
+                }
+            }
 
             // Extract Git renames (R status) with -M similarity flag to detect renamed/moved files
             const gitRenamedOldPaths = new Set();
@@ -443,12 +464,14 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
             // ABSOLUTE ZERO FALSE POSITIVE CHECKER:
             // Checks if a file physically exists in vault abstract tree, on disk, or under any moved/renamed path
-            const fileExistsInVault = (testPath, testName) => {
+            // FIX: basename check now requires same extension to avoid cross-format false negatives
+            const fileExistsInVault = (testPath, testName, testExtension) => {
                 if (!testPath && !testName) return true;
 
                 const pathLower = (testPath || "").toLowerCase();
                 const fileName = (testName || (testPath ? testPath.substring(testPath.lastIndexOf("/") + 1) : "")).toLowerCase();
                 const baseName = fileName.includes(".") ? fileName.substring(0, fileName.lastIndexOf(".")) : fileName;
+                const extLower = (testExtension || "").toLowerCase();
 
                 // 1. Direct AbstractFileByPath lookup in Obsidian Vault
                 if (testPath && this.app.vault.getAbstractFileByPath(testPath)) return true;
@@ -456,18 +479,33 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 // 2. Case-insensitive path lookup in vault file tree
                 if (pathLower && currentPaths.has(pathLower)) return true;
 
-                // 3. Vault-wide filename or basename match (Moved to another folder)
+                // 3. Vault-wide filename match (exact name including extension — Moved to another folder)
                 if (fileName && currentNames.has(fileName)) return true;
-                if (baseName && currentBasenames.has(baseName)) return true;
 
-                // 4. Git Rename/Relocation match (Renamed or moved via Git)
+                // 4. Vault-wide basename match ONLY if same extension exists (prevents Proyecto.md vs Proyecto.canvas confusion)
+                if (baseName && extLower && currentBasenameExtMap.has(baseName)) {
+                    const existingExts = currentBasenameExtMap.get(baseName);
+                    if (existingExts.has(extLower)) return true;
+                }
+
+                // 5. Git Rename/Relocation match (Renamed or moved via Git)
                 if (pathLower && gitRenamedOldPaths.has(pathLower)) return true;
 
-                // 5. In-memory recently renamed set
+                // 6. In-memory recently renamed set
                 if (this.recentlyRenamedPaths && (this.recentlyRenamedPaths.has(testPath) || this.recentlyRenamedPaths.has(pathLower))) return true;
 
                 return false;
             };
+
+            // Build set of existing history entries to prevent duplicates across restarts
+            const existingHistoryPaths = new Set();
+            if (this.settings.deletedHistory && this.settings.deletedHistory.length > 0) {
+                for (const entry of this.settings.deletedHistory) {
+                    if (entry.isLostFile && !entry.restored && entry.path) {
+                        existingHistoryPaths.add(entry.path.toLowerCase());
+                    }
+                }
+            }
 
             const lostFilesMap = new Map();
 
@@ -482,11 +520,20 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     if (!this.isProtectedExtension(prev.extension)) continue;
 
                     // IF FILE EXISTS ANYWHERE IN VAULT -> NOT LOST!
-                    if (!fileExistsInVault(prev.path, prev.name)) {
-                        // Check content size fingerprint
-                        if (prev.size && prev.size > 0 && currentSizes.has(prev.size)) {
-                            continue; // File content exists under another name/location
+                    if (!fileExistsInVault(prev.path, prev.name, prev.extension)) {
+
+                        // FINAL PHYSICAL DISK VERIFICATION: adapter.exists() as last resort
+                        // This catches files that Obsidian hasn't indexed yet during early startup
+                        let existsOnDisk = false;
+                        try {
+                            existsOnDisk = await adapter.exists(prev.path);
+                        } catch (diskErr) {
+                            // Silently ignore disk errors
                         }
+                        if (existsOnDisk) continue;
+
+                        // DEDUPLICATION: Skip if already present in deletedHistory from a previous session
+                        if (existingHistoryPaths.has(prev.path.toLowerCase())) continue;
 
                         // Check if file was moved to .trash folder
                         let inTrash = false;
@@ -523,7 +570,18 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     const fileName = gitPath.substring(gitPath.lastIndexOf("/") + 1);
 
                     // IF FILE EXISTS ANYWHERE IN VAULT -> NOT LOST!
-                    if (!fileExistsInVault(gitPath, fileName)) {
+                    if (!fileExistsInVault(gitPath, fileName, ext)) {
+
+                        // FINAL PHYSICAL DISK VERIFICATION
+                        let existsOnDisk = false;
+                        try {
+                            existsOnDisk = await adapter.exists(gitPath);
+                        } catch (diskErr) {}
+                        if (existsOnDisk) continue;
+
+                        // DEDUPLICATION
+                        if (existingHistoryPaths.has(gitPath.toLowerCase())) continue;
+
                         const existingEntry = lostFilesMap.get(gitPath);
 
                         if (existingEntry) {
@@ -542,7 +600,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
             }
 
             // 3. Vault Guard MOC Link Graph Audit (With fixed WikiLink path resolution & Zoottelkeeper Exclusion)
-            if (this.settings.trackLinks) {
+            // FIX: Only report a broken link as "archivo perdido" if the target PREVIOUSLY EXISTED in the snapshot.
+            // Otherwise it's just an unresolved link, NOT a deletion.
+            if (this.settings.trackLinks && previousSnapshot && previousSnapshot.length > 0) {
                 const files = this.app.vault.getMarkdownFiles();
                 const scanLimit = Math.min(files.length, 300);
                 for (let i = 0; i < scanLimit; i++) {
@@ -574,11 +634,28 @@ class VaultGuardPlugin extends obsidian.Plugin {
                             // ALWAYS EXCLUDE ZOOTTELKEEPER MOC INDEX FILES!
                             if (this.isZoottelkeeperIndexFile(targetFullPath) || this.isZoottelkeeperIndexFile(rawLink)) continue;
 
+                            // CRITICAL FIX: Only report as "lost" if the link target PREVIOUSLY EXISTED in the vault snapshot.
+                            // A link to [[NotaQueNuncaExistio]] is just a broken/unresolved link, NOT a deletion event.
+                            const targetPathLower = targetFullPath.toLowerCase();
+                            const linkFileNameLower = cleanMdName.toLowerCase();
+                            const rawLinkLower = (rawLink.endsWith(".md") ? rawLink : `${rawLink}.md`).toLowerCase();
+
+                            const existedInPreviousSnapshot = 
+                                previousSnapshotPaths.has(targetPathLower) ||
+                                previousSnapshotNames.has(linkFileNameLower) ||
+                                previousSnapshotNames.has(rawLinkLower) ||
+                                previousSnapshotPaths.has(rawLinkLower);
+
+                            if (!existedInPreviousSnapshot) continue;
+
                             // IF LINKED FILE EXISTS ANYWHERE IN VAULT -> NOT LOST!
-                            if (!fileExistsInVault(targetFullPath, linkFileName) && !fileExistsInVault(rawLink, rawLink)) {
+                            if (!fileExistsInVault(targetFullPath, linkFileName, "md") && !fileExistsInVault(rawLink, rawLink, "md")) {
                                 if (!this.isPathIgnoredByGitignore(targetFullPath)) {
                                     const ext = cleanMdName.substring(cleanMdName.lastIndexOf(".") + 1).toLowerCase();
                                     if (this.isProtectedExtension(ext) && !lostFilesMap.has(targetFullPath)) {
+                                        // DEDUPLICATION
+                                        if (existingHistoryPaths.has(targetPathLower)) continue;
+
                                         lostFilesMap.set(targetFullPath, {
                                             path: targetFullPath,
                                             name: rawLink,
@@ -1267,13 +1344,15 @@ class VaultGuardPlugin extends obsidian.Plugin {
         });
     }
 
-    // Helper: Ultra-light Flexible Partial & Tokenized Search Matcher
-    matchesFuzzySearchTerm(targetString, searchTerm) {
-        if (!searchTerm || !searchTerm.trim()) return true;
-        const target = targetString.toLowerCase();
+    // Helper: Generate Fuzzy Regex from Search Term (Adapted from git-search.sh generar_regex_difuso)
+    // Truncates long words to 80% of their length and joins with .* for flexible matching.
+    // Example: "Manejo de negativas" → /manej.*negativ/i (finds variations like Manejo_de_las_Negativas.md)
+    generateFuzzyRegex(searchTerm) {
+        if (!searchTerm || !searchTerm.trim()) return null;
+
         const terms = searchTerm.toLowerCase().split(/\s+/).filter(t => t.length > 0);
 
-        // Ignore common short spanish noise words if query has multiple words
+        // Filter out common short spanish noise words when query has multiple words
         const noiseWords = new Set(["de", "del", "la", "el", "los", "las", "en", "un", "una", "y", "o", "a"]);
         let keyTerms = terms;
         if (terms.length > 1) {
@@ -1283,7 +1362,55 @@ class VaultGuardPlugin extends obsidian.Plugin {
             }
         }
 
-        // All key terms must be present in target string (in any order)
+        // Build regex: truncate each word >4 chars to 80% length, escape special chars, join with .*
+        const regexParts = keyTerms.map(word => {
+            let truncated = word;
+            if (word.length > 4) {
+                const keep = Math.ceil(word.length * 0.8);
+                truncated = word.substring(0, keep);
+            }
+            // Escape regex special characters
+            truncated = truncated.replace(/[\\\[\](){}*+?|^$.]/g, "\\$&");
+            return truncated;
+        });
+
+        const pattern = regexParts.join(".*");
+
+        try {
+            return new RegExp(pattern, "i");
+        } catch (e) {
+            console.error("Error generando regex difuso:", e);
+            return null;
+        }
+    }
+
+    // Helper: Fuzzy Search Matcher (Uses fuzzy regex + literal fallback)
+    matchesFuzzySearchTerm(targetString, searchTerm) {
+        if (!searchTerm || !searchTerm.trim()) return true;
+        if (!targetString) return false;
+
+        const target = targetString.toLowerCase();
+        const cleanTerm = searchTerm.toLowerCase().trim();
+
+        // 1. Try fuzzy regex match first (tolerant to suffixes and variations)
+        const fuzzyRegex = this.generateFuzzyRegex(searchTerm);
+        if (fuzzyRegex && fuzzyRegex.test(target)) {
+            return true;
+        }
+
+        // 2. Fallback: literal substring check (exact match)
+        if (target.includes(cleanTerm)) {
+            return true;
+        }
+
+        // 3. Fallback: all individual key terms present in any order
+        const noiseWords = new Set(["de", "del", "la", "el", "los", "las", "en", "un", "una", "y", "o", "a"]);
+        const terms = cleanTerm.split(/\s+/).filter(t => t.length > 0);
+        let keyTerms = terms;
+        if (terms.length > 1) {
+            const filtered = terms.filter(t => !noiseWords.has(t));
+            if (filtered.length > 0) keyTerms = filtered;
+        }
         return keyTerms.every(term => target.includes(term));
     }
 
@@ -1853,11 +1980,7 @@ class VaultGuardView extends obsidian.ItemView {
                 text: "Buscar también en el contenido / diff de los commits"
             });
 
-            // Progress Bar Container (Subtle gray by default, activates vibrant on click)
-            const progressContainer = filterPanel.createDiv({ cls: "vg-progress-container" });
-            this.progressBarFill = progressContainer.createDiv({ cls: "vg-progress-bar-fill" });
-            this.progressBarFill.style.width = "0%";
-
+            // Search Button (placed ABOVE the progress bar)
             const searchBtn = filterPanel.createEl("button", {
                 cls: "vg-btn vg-btn-restore vg-btn-search-git",
                 text: this.isGitSearching ? "Buscando en Git..." : "Buscar en Historial Git"
@@ -1866,6 +1989,22 @@ class VaultGuardView extends obsidian.ItemView {
             searchBtn.addEventListener("click", async () => {
                 this.triggerGitSearch(logContainer);
             });
+
+            // Progress Bar Container BELOW the button (Subtle gray by default, activates vibrant on search)
+            const progressContainer = filterPanel.createDiv({ cls: "vg-progress-container" });
+            this.progressBarFill = progressContainer.createDiv({ cls: "vg-progress-bar-fill" });
+
+            // Persist 100% state from previous completed search, or 0% if never searched
+            if (this.hasSearchedGit && !this.isGitSearching) {
+                this.progressBarFill.style.width = "100%";
+                this.progressBarFill.addClass("completed");
+            } else {
+                this.progressBarFill.style.width = "0%";
+            }
+
+            // Percentage label inside the progress bar
+            this.progressLabel = progressContainer.createDiv({ cls: "vg-progress-label" });
+            this.progressLabel.setText(this.hasSearchedGit && !this.isGitSearching ? "100%" : "");
         }
 
         // 4. Scrollable Log Container Box
@@ -1882,9 +2021,14 @@ class VaultGuardView extends obsidian.ItemView {
         this.hasSearchedGit = true;
         this.isGitSearching = true;
 
+        // Reset progress bar to active searching state
         if (this.progressBarFill) {
+            this.progressBarFill.removeClass("completed");
             this.progressBarFill.addClass("active");
             this.progressBarFill.style.width = "15%";
+        }
+        if (this.progressLabel) {
+            this.progressLabel.setText("15%");
         }
 
         this.renderGitResults(logContainer);
@@ -1893,12 +2037,17 @@ class VaultGuardView extends obsidian.ItemView {
             if (this.progressBarFill) {
                 this.progressBarFill.style.width = `${percentage}%`;
                 if (isActive) {
+                    this.progressBarFill.removeClass("completed");
                     this.progressBarFill.addClass("active");
                 } else {
-                    setTimeout(() => {
-                        if (this.progressBarFill) this.progressBarFill.removeClass("active");
-                    }, 1200);
+                    // Search completed: transition to 100% completed state
+                    this.progressBarFill.style.width = "100%";
+                    this.progressBarFill.removeClass("active");
+                    this.progressBarFill.addClass("completed");
                 }
+            }
+            if (this.progressLabel) {
+                this.progressLabel.setText(`${percentage}%`);
             }
         };
 
@@ -1911,6 +2060,17 @@ class VaultGuardView extends obsidian.ItemView {
         );
 
         this.isGitSearching = false;
+
+        // Ensure bar stays at 100% after completion
+        if (this.progressBarFill) {
+            this.progressBarFill.style.width = "100%";
+            this.progressBarFill.removeClass("active");
+            this.progressBarFill.addClass("completed");
+        }
+        if (this.progressLabel) {
+            this.progressLabel.setText("100%");
+        }
+
         this.renderGitResults(logContainer);
     }
 
@@ -2026,16 +2186,16 @@ class VaultGuardView extends obsidian.ItemView {
             metaEl.createSpan({ cls: callerClass, text: item.deletedBy });
             metaEl.createSpan({ cls: "vg-timestamp", text: item.deletedAt });
 
-            // Status Tag (Normal vs Archivo Perdido Tag)
+            // Status Tag — RESTORED always takes priority regardless of origin (lost file, trash, or normal deletion)
             let statusText = "En .trash";
             let statusCls = "vg-status-in-trash";
 
-            if (item.isLostFile) {
-                statusText = item.inTrash ? "Papelera (.trash)" : "Archivo perdido";
-                statusCls = item.inTrash ? "vg-status-in-trash" : "vg-status-purged";
-            } else if (item.restored) {
+            if (item.restored) {
                 statusText = "Restaurado";
                 statusCls = "vg-status-restored";
+            } else if (item.isLostFile) {
+                statusText = item.inTrash ? "Papelera (.trash)" : "Archivo perdido";
+                statusCls = item.inTrash ? "vg-status-in-trash" : "vg-status-purged";
             }
 
             metaEl.createSpan({ cls: `vg-status-tag ${statusCls}`, text: statusText });
@@ -2200,6 +2360,24 @@ class GitDatePickerModal extends obsidian.Modal {
                 this.close();
             });
         }
+
+        // "Hoy" (Today) Quick-Select Button at the bottom of the calendar
+        const footerRow = contentEl.createDiv({ cls: "vg-cal-footer" });
+        const todayBtn = footerRow.createEl("button", {
+            cls: "vg-btn vg-btn-today",
+            text: "📍 Hoy"
+        });
+        todayBtn.addEventListener("click", () => {
+            const t = new Date();
+            const yy = t.getFullYear();
+            const mm = String(t.getMonth() + 1).padStart(2, "0");
+            const dd = String(t.getDate()).padStart(2, "0");
+            const dateStr = `${yy}-${mm}-${dd}`;
+            if (this.onSelectDate) {
+                this.onSelectDate(dateStr);
+            }
+            this.close();
+        });
     }
 
     onClose() {
