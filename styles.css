@@ -1,0 +1,742 @@
+/* Vault Guard Plugin Styling */
+
+.vault-guard-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    gap: 10px;
+    padding: 10px;
+    box-sizing: border-box;
+    font-family: var(--font-interface);
+    background-color: var(--background-primary);
+    color: var(--text-normal);
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* Header & Badges */
+.vg-header {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    flex-shrink: 0;
+}
+
+.vg-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.vg-title-row h4 {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 1.05em;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.vg-status-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+}
+
+.vg-badge {
+    font-size: 0.72em;
+    padding: 2px 7px;
+    border-radius: 12px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.vg-badge-active {
+    background-color: rgba(var(--color-green-rgb, 46, 204, 113), 0.15);
+    color: var(--text-success, #2ecc71);
+    border: 1px solid rgba(var(--color-green-rgb, 46, 204, 113), 0.3);
+}
+
+.vg-badge-warning {
+    background-color: rgba(var(--color-orange-rgb, 230, 126, 34), 0.18);
+    color: var(--text-warning, #e67e22);
+    border: 1px solid rgba(var(--color-orange-rgb, 230, 126, 34), 0.4);
+    font-weight: 700;
+}
+
+.vg-badge-disabled {
+    background-color: var(--background-modifier-accent-subtle, rgba(127, 127, 127, 0.15));
+    color: var(--text-muted);
+    border: 1px solid var(--background-modifier-border);
+}
+
+/* Tabs for Normal Log vs Git History */
+.vg-tab-header {
+    display: flex;
+    gap: 6px;
+    border-bottom: 2px solid var(--background-modifier-border);
+    margin-bottom: 2px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+.vg-tab-button {
+    padding: 6px 10px;
+    font-size: 0.82em;
+    font-weight: 600;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all 0.2s ease;
+}
+
+.vg-tab-button:hover {
+    color: var(--text-normal);
+}
+
+.vg-tab-button.active {
+    color: var(--interactive-accent);
+    border-bottom-color: var(--interactive-accent);
+}
+
+/* Search Container & Filter Panel */
+.vg-filter-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border-radius: 8px;
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    flex-shrink: 0;
+}
+
+.vg-search-container {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    width: 100%;
+}
+
+.vg-search-input, .vg-date-input-group input {
+    flex: 1;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--background-modifier-border);
+    background-color: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 0.85em;
+    box-sizing: border-box;
+    pointer-events: auto !important;
+    user-select: text !important;
+    -webkit-user-select: text !important;
+    cursor: text !important;
+    position: relative;
+    z-index: 10;
+}
+
+.vg-search-input:focus, .vg-date-input-group input:focus {
+    outline: none;
+    border-color: var(--interactive-accent);
+    box-shadow: 0 0 4px rgba(var(--interactive-accent-rgb, 52, 152, 219), 0.4);
+}
+
+/* Progress Bar for Git Search */
+.vg-progress-container {
+    width: 100%;
+    height: 6px;
+    background-color: var(--background-modifier-border, #4a5568);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 2px;
+    position: relative;
+}
+
+.vg-progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background-color: #7f8c8d; /* Subtle gray by default when idle */
+    transition: width 0.3s ease, background-color 0.3s ease;
+    border-radius: 3px;
+}
+
+.vg-progress-bar-fill.active {
+    background: linear-gradient(90deg, #27ae60, #2ecc71, #3498db); /* Vibrant green/blue gradient when active */
+    box-shadow: 0 0 10px rgba(46, 204, 113, 0.7);
+}
+
+/* Responsive Date Range Filter Box */
+.vg-date-range-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: stretch;
+    width: 100%;
+}
+
+.vg-date-field {
+    flex: 1 1 140px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.vg-date-field label {
+    font-size: 0.72em;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.vg-date-input-group {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    width: 100%;
+}
+
+.vg-btn-picker {
+    padding: 4px 6px;
+    font-size: 0.82em;
+    border-radius: 4px;
+    border: 1px solid var(--background-modifier-border);
+    background-color: var(--background-secondary-alt);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.vg-btn-picker:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+/* Checkbox Row for Diff Search */
+.vg-checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8em;
+    color: var(--text-normal);
+    cursor: pointer;
+    margin-top: 1px;
+    user-select: none;
+}
+
+.vg-checkbox-row input {
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+}
+
+.vg-btn-search-git {
+    width: 100%;
+    padding: 7px 10px;
+    font-size: 0.85em;
+    font-weight: 600;
+    box-sizing: border-box;
+}
+
+/* Calendar Modal (Inspired by r-calendar) */
+.vg-calendar-modal {
+    max-width: 320px;
+    padding: 14px;
+}
+
+.vg-cal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.vg-cal-title {
+    font-size: 1em;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.vg-cal-nav {
+    background: none;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+    color: var(--text-normal);
+}
+
+.vg-cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 4px;
+    text-align: center;
+}
+
+.vg-cal-day-header {
+    font-size: 0.75em;
+    font-weight: 700;
+    color: var(--text-muted);
+    padding: 4px 0;
+}
+
+.vg-cal-day {
+    padding: 6px 0;
+    border-radius: 4px;
+    font-size: 0.85em;
+    cursor: pointer;
+    background-color: var(--background-secondary);
+    transition: background-color 0.15s ease;
+}
+
+.vg-cal-day:hover {
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+.vg-cal-day-empty {
+    visibility: hidden;
+}
+
+.vg-cal-day-today {
+    border: 1px solid var(--interactive-accent);
+    font-weight: 700;
+}
+
+/* Dynamic Scrollable Log Container Box (Fully Flexible Without Artificial Height Caps) */
+.vg-log-container {
+    flex: 1 1 auto;
+    min-height: 140px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 6px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background-color: var(--background-secondary-alt);
+    box-sizing: border-box;
+}
+
+/* Custom Scrollbar for log box */
+.vg-log-container::-webkit-scrollbar,
+.vault-guard-container::-webkit-scrollbar {
+    width: 6px;
+}
+.vg-log-container::-webkit-scrollbar-thumb,
+.vault-guard-container::-webkit-scrollbar-thumb {
+    background: var(--background-modifier-border);
+    border-radius: 3px;
+}
+.vg-log-container::-webkit-scrollbar-thumb:hover,
+.vault-guard-container::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
+
+/* Empty State */
+.vg-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 120px;
+    padding: 20px;
+    text-align: center;
+    color: var(--text-muted);
+    gap: 8px;
+}
+
+.vg-empty-state svg {
+    opacity: 0.5;
+}
+
+/* Entry Item Card */
+.vg-log-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+    background-color: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+    flex-shrink: 0;
+}
+
+.vg-log-card:hover {
+    border-color: var(--interactive-accent);
+}
+
+.vg-log-card-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.vg-log-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-top: 2px;
+    color: var(--text-muted);
+}
+
+.vg-log-details {
+    flex: 1;
+    min-width: 0;
+}
+
+.vg-log-name {
+    font-weight: 600;
+    font-size: 0.9em;
+    color: var(--text-normal);
+    word-break: break-all;
+}
+
+.vg-log-path {
+    font-size: 0.75em;
+    color: var(--text-muted);
+    word-break: break-all;
+    margin-top: 2px;
+}
+
+.vg-log-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    font-size: 0.75em;
+}
+
+.vg-caller-info {
+    color: var(--text-accent, #3498db);
+    font-weight: 500;
+}
+
+.vg-caller-plugin {
+    color: var(--text-warning, #e67e22);
+    font-weight: 600;
+}
+
+.vg-timestamp {
+    color: var(--text-muted);
+}
+
+.vg-status-tag {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.7em;
+    font-weight: 500;
+}
+
+.vg-status-in-trash {
+    background-color: rgba(var(--color-yellow-rgb, 241, 196, 15), 0.15);
+    color: var(--text-warning, #f39c12);
+}
+
+.vg-status-restored {
+    background-color: rgba(var(--color-green-rgb, 46, 204, 113), 0.15);
+    color: var(--text-success, #2ecc71);
+}
+
+.vg-status-purged {
+    background-color: rgba(var(--color-red-rgb, 231, 76, 60), 0.15);
+    color: var(--text-error, #e74c3c);
+}
+
+/* Card Action Buttons */
+.vg-log-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--background-modifier-border);
+    flex-wrap: wrap;
+}
+
+.vg-btn {
+    font-size: 0.82em;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: all 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.vg-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.18);
+}
+
+.vg-btn:active {
+    transform: translateY(0);
+}
+
+/* Vibrant Sí / No Confirmation Buttons */
+.vg-btn-yes {
+    background-color: #27ae60 !important;
+    color: #ffffff !important;
+}
+
+.vg-btn-yes:hover {
+    background-color: #219653 !important;
+}
+
+.vg-btn-yes-danger {
+    background-color: #e74c3c !important;
+    color: #ffffff !important;
+}
+
+.vg-btn-yes-danger:hover {
+    background-color: #c0392b !important;
+}
+
+.vg-btn-no {
+    background-color: #2980b9 !important;
+    color: #ffffff !important;
+}
+
+.vg-btn-no:hover {
+    background-color: #1f618d !important;
+}
+
+.vg-btn-restore {
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+.vg-btn-git {
+    background-color: #e67e22 !important;
+    color: #ffffff !important;
+}
+
+.vg-btn-git:hover {
+    background-color: #d35400 !important;
+}
+
+.vg-btn-network {
+    background-color: #8e44ad !important;
+    color: #ffffff !important;
+}
+
+.vg-btn-network:hover {
+    background-color: #71368a !important;
+}
+
+.vg-btn-links {
+    background-color: var(--background-secondary);
+    color: var(--text-normal);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.vg-btn-danger {
+    background-color: rgba(var(--color-red-rgb, 231, 76, 60), 0.15);
+    color: var(--text-error, #e74c3c);
+    border: 1px solid rgba(var(--color-red-rgb, 231, 76, 60), 0.3);
+}
+
+/* Modal Styles */
+.vg-modal-confirm {
+    max-width: 540px;
+    padding: 16px;
+}
+
+.vg-modal-confirm h3 {
+    margin-top: 0;
+    margin-bottom: 12px;
+    font-size: 1.2em;
+}
+
+.vg-modal-file-box {
+    margin: 10px 0;
+    padding: 12px 14px;
+    border-radius: 8px;
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.vg-modal-file-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.vg-modal-label {
+    font-size: 0.75em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 700;
+    color: var(--text-muted);
+}
+
+.vg-modal-file-name {
+    font-size: 1.05em;
+    font-weight: 700;
+    color: var(--text-normal);
+    word-break: break-all;
+}
+
+.vg-modal-file-path {
+    font-family: var(--font-monospace);
+    font-size: 0.82em;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background-color: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    color: var(--text-accent, #3498db);
+    word-break: break-all;
+}
+
+/* Explicit Solicitante Field Box */
+.vg-modal-solicitante-box {
+    margin: 8px 0 14px 0;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background-color: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.vg-solicitante-user {
+    border-left: 4px solid var(--text-accent, #3498db);
+}
+
+.vg-solicitante-plugin {
+    border-left: 4px solid var(--text-warning, #e67e22);
+    background-color: rgba(var(--color-orange-rgb, 230, 126, 34), 0.08);
+}
+
+.vg-modal-solicitante-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.vg-modal-solicitante-value {
+    font-weight: 700;
+    font-size: 0.95em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.vg-val-user {
+    color: var(--text-accent, #3498db);
+}
+
+.vg-val-plugin {
+    color: var(--text-warning, #e67e22);
+}
+
+.vg-modal-caller-process {
+    font-family: var(--font-monospace);
+    font-size: 0.82em;
+    color: var(--text-normal);
+    background: var(--background-secondary);
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--background-modifier-border);
+    word-break: break-all;
+    margin-top: 2px;
+}
+
+.vg-modal-warning-box {
+    margin: 12px 0;
+    padding: 10px 14px;
+    border-radius: 6px;
+    background-color: rgba(var(--color-red-rgb, 231, 76, 60), 0.1);
+    border-left: 4px solid var(--text-error, #e74c3c);
+    font-size: 0.9em;
+    color: var(--text-normal);
+}
+
+/* Network Restoration Checklist */
+.vg-links-container {
+    max-height: 250px;
+    overflow-y: auto;
+    margin: 10px 0;
+    padding: 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background-color: var(--background-secondary);
+}
+
+.vg-network-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    font-size: 0.85em;
+    gap: 8px;
+}
+
+.vg-network-item:last-child {
+    border-bottom: none;
+}
+
+.vg-network-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+}
+
+.vg-network-path {
+    font-family: var(--font-monospace);
+    font-size: 0.9em;
+    word-break: break-all;
+}
+
+.vg-link-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    font-size: 0.85em;
+}
+
+.vg-link-row:last-child {
+    border-bottom: none;
+}
+
+.vg-link-exists {
+    color: var(--text-success, #2ecc71);
+    font-weight: 500;
+}
+
+.vg-link-recoverable {
+    color: var(--text-warning, #f39c12);
+    font-weight: 600;
+}
+
+.vg-link-missing {
+    color: var(--text-error, #e74c3c);
+    font-weight: 500;
+}

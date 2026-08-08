@@ -1,0 +1,10 @@
+{
+	"id": "vault-guard",
+	"name": "Vault Guard",
+	"version": "1.0.0",
+	"minAppVersion": "1.0.0",
+	"description": "Protección de la bóveda de Obsidian ante eliminaciones no deseadas, modo Total Guard, confirmaciones secuenciales, vista de log y restauración.",
+	"author": "Baalgarthem",
+	"authorUrl": "https://github.com/Baalgarthem",
+	"isDesktopOnly": false
+}
