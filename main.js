@@ -26,6 +26,7 @@ const DEFAULT_SETTINGS = {
     respectGitignore: false, // Disabled by default
     gitSearchTimeout: 10, // Timeout in seconds (default 10s)
     maxHistoryEntries: 100,
+    dismissedLostFilePaths: [], // Persistent blacklist of paths manually removed or cleared by user
     deletedHistory: []
 };
 
@@ -514,6 +515,11 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 return false;
             };
 
+            // Build set of dismissed paths manually removed or cleared by user so they NEVER reappear
+            const dismissedSet = new Set(
+                (this.settings.dismissedLostFilePaths || []).map(p => p.toLowerCase())
+            );
+
             // AUTO-SANITIZER: Clean up any stale false-positive "archivo perdido" entries from previous sessions
             if (this.settings.deletedHistory && this.settings.deletedHistory.length > 0) {
                 let historyChanged = false;
@@ -555,10 +561,14 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 for (let i = 0; i < previousSnapshot.length; i++) {
                     const prev = previousSnapshot[i];
                     
-                    // ALWAYS EXCLUDE ZOOTTELKEEPER MOC INDEX FILES!
+                    // ALWAYS EXCLUDE ZOOTTELKEEPER MOC INDEX FILES & DISMISSED PATHS!
                     if (this.isZoottelkeeperIndexFile(prev.path)) continue;
                     if (this.isPathIgnoredByGitignore(prev.path)) continue;
                     if (!this.isProtectedExtension(prev.extension)) continue;
+
+                    const prevPathLower = (prev.path || "").toLowerCase();
+                    const prevNameLower = (prev.name || "").toLowerCase();
+                    if (dismissedSet.has(prevPathLower) || dismissedSet.has(prevNameLower)) continue;
 
                     // IF FILE EXISTS ANYWHERE IN VAULT -> NOT LOST!
                     if (!fileExistsInVault(prev.path, prev.name, prev.extension)) {
@@ -598,7 +608,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
             if (this.isGitRepoValid && this.settings.enableGitIntegration) {
                 const gitDeleted = await this.getGitDiffDeletedFiles();
                 for (const gitPath of gitDeleted) {
-                    // ALWAYS EXCLUDE ZOOTTELKEEPER MOC INDEX FILES!
+                    // ALWAYS EXCLUDE ZOOTTELKEEPER MOC INDEX FILES & DISMISSED PATHS!
                     if (this.isZoottelkeeperIndexFile(gitPath)) continue;
                     if (this.isPathIgnoredByGitignore(gitPath)) continue;
 
@@ -606,6 +616,8 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     if (!this.isProtectedExtension(ext)) continue;
 
                     const fileName = gitPath.substring(gitPath.lastIndexOf("/") + 1);
+
+                    if (dismissedSet.has(gitPath.toLowerCase()) || dismissedSet.has(fileName.toLowerCase())) continue;
 
                     // IF FILE EXISTS ANYWHERE IN VAULT -> NOT LOST!
                     if (!fileExistsInVault(gitPath, fileName, ext)) {
@@ -668,6 +680,8 @@ class VaultGuardPlugin extends obsidian.Plugin {
                             // CRITICAL FIX: Only report as "lost" if the link target PREVIOUSLY EXISTED in the vault snapshot.
                             const targetPathLower = (rawLink.endsWith(".md") ? rawLink : `${rawLink}.md`).toLowerCase();
                             const linkFileNameLower = cleanMdName.toLowerCase();
+
+                            if (dismissedSet.has(targetPathLower) || dismissedSet.has(linkFileNameLower) || dismissedSet.has(rawLink.toLowerCase())) continue;
 
                             const existedInPreviousSnapshot = 
                                 previousSnapshotPaths.has(targetPathLower) ||
@@ -784,6 +798,36 @@ class VaultGuardPlugin extends obsidian.Plugin {
             await adapter.write(snapshotPath, JSON.stringify(filteredSnapshot));
         } catch (e) {
             console.error("Error actualizando snapshot.json:", e);
+        }
+    }
+
+    // Dismiss an item so it NEVER reappears in lost files audit or history
+    dismissHistoryItem(item) {
+        if (!this.settings.dismissedLostFilePaths) {
+            this.settings.dismissedLostFilePaths = [];
+        }
+        if (item && item.path && item.path !== "--") {
+            const pLower = item.path.toLowerCase();
+            if (!this.settings.dismissedLostFilePaths.includes(pLower)) {
+                this.settings.dismissedLostFilePaths.push(pLower);
+            }
+        }
+        if (item && item.name && item.name !== "unknown") {
+            const nLower = item.name.toLowerCase();
+            if (!this.settings.dismissedLostFilePaths.includes(nLower)) {
+                this.settings.dismissedLostFilePaths.push(nLower);
+            }
+        }
+    }
+
+    dismissAllHistoryItems() {
+        if (!this.settings.dismissedLostFilePaths) {
+            this.settings.dismissedLostFilePaths = [];
+        }
+        if (this.settings.deletedHistory && this.settings.deletedHistory.length > 0) {
+            for (const item of this.settings.deletedHistory) {
+                this.dismissHistoryItem(item);
+            }
         }
     }
 
@@ -1150,7 +1194,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
         const safeQueue = this.confirmationQueue.catch(() => {});
 
         const nextPromise = safeQueue.then(() => {
-            return new Promise(async (resolve, reject) => {
+            return new Promise(async (resolve) => {
                 try {
                     const caller = this.detectCallerInfo();
 
@@ -1185,7 +1229,8 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     if (!allowed) {
                         if (file && file.path) this.capturedLinksMap.delete(file.path);
                         new obsidian.Notice(`[Vault Guard] Eliminación cancelada.`);
-                        return reject(new Error("Eliminación cancelada por el usuario."));
+                        // Resolving with false instead of rejecting prevents Obsidian UI & caller plugins from caching 'cancelled' or crashing, ensuring modal pops up obligatorily on every future attempt!
+                        return resolve(false);
                     }
 
                     // Execute proceedCallback with re-entrancy guard enabled!
@@ -1200,7 +1245,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     if (file && file.path) {
                         this.capturedLinksMap.delete(file.path);
                     }
-                    reject(err);
+                    resolve(false);
                 }
             });
         });
@@ -1359,9 +1404,11 @@ class VaultGuardPlugin extends obsidian.Plugin {
             const timeoutMs = timeoutSec * 1000;
             let isTimedOut = false;
 
+            const finalArgs = ["-c", "core.quotePath=false", ...args];
+
             const childProc = child_process.execFile(
                 "git",
-                args,
+                finalArgs,
                 { cwd: basePath, maxBuffer: 5 * 1024 * 1024 },
                 (err, stdout, stderr) => {
                     if (timer) clearTimeout(timer);
@@ -1459,51 +1506,164 @@ class VaultGuardPlugin extends obsidian.Plugin {
         return keyTerms.every(term => target.includes(term));
     }
 
-    // Git Operations: Multi-Flag Advanced File Search Engine in Git History
+    // Mechanism 1: O(1) Fast resolution of a known candidate file path in Git
+    async resolveKnownDeletedFilePath(filePath) {
+        if (!this.isGitRepoValid || !filePath) return null;
+
+        try {
+            const cleanPath = filePath.trim();
+            const revOutput = await this.execGitCommand(["rev-list", "-n", "1", "HEAD", "--", cleanPath]);
+            const lastCommit = (revOutput || "").trim();
+
+            if (!lastCommit) return null;
+
+            let existsAtHead = false;
+            try {
+                const lsOutput = await this.execGitCommand(["ls-tree", "HEAD", "--", cleanPath]);
+                existsAtHead = (lsOutput || "").trim().length > 0;
+            } catch (e) {}
+
+            if (!existsAtHead) {
+                const commitInfo = await this.execGitCommand(["log", "-n", "1", "--pretty=format:%H|%an|%ad|%s", "--date=format:%Y-%m-%d %H:%M:%S", lastCommit]);
+                const parts = (commitInfo || "").split("|");
+                return {
+                    id: `historical:${lastCommit}:${cleanPath}`,
+                    type: "historical",
+                    badgeLabel: "Eliminado en Commit",
+                    badgeCls: "vg-status-historical",
+                    filePath: cleanPath,
+                    fileName: cleanPath.substring(cleanPath.lastIndexOf("/") + 1),
+                    commitHash: lastCommit,
+                    restoreSpec: `${lastCommit}~1`,
+                    author: parts[1] || "Git User",
+                    displayDate: parts[2] || "Desconocida",
+                    message: parts[3] || "Commit de eliminación"
+                };
+            }
+        } catch (err) {
+            console.error("Error al resolver ruta conocida en Git:", err);
+        }
+        return null;
+    }
+
+    // Mechanism 3: Detect uncommitted deletions in local working tree (git status --porcelain)
+    async getUncommittedDeletedFiles() {
+        if (!this.isGitRepoValid) return [];
+
+        try {
+            const statusOutput = await this.execGitCommand(["status", "--porcelain", "-z"]);
+            if (!statusOutput) return [];
+
+            const entries = statusOutput.split("\0");
+            const results = [];
+
+            for (let i = 0; i < entries.length; i++) {
+                const entry = entries[i];
+                if (!entry || entry.length < 3) continue;
+
+                const statusXY = entry.substring(0, 2);
+                const filePath = entry.substring(3).trim();
+
+                if (statusXY.includes("D") && filePath) {
+                    const fileName = filePath.substring(filePath.lastIndexOf("/") + 1);
+                    const ext = fileName.includes(".") ? fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase() : "md";
+
+                    if (ext !== "md" && !this.isProtectedExtension(ext)) continue;
+                    if (this.isPathIgnoredByGitignore(filePath)) continue;
+
+                    results.push({
+                        id: `uncommitted:${filePath}`,
+                        type: "uncommitted",
+                        badgeLabel: "Eliminación Local Pendiente",
+                        badgeCls: "vg-status-uncommitted",
+                        filePath: filePath,
+                        fileName: fileName,
+                        commitHash: "HEAD",
+                        restoreSpec: "HEAD",
+                        author: "Local (Working Tree)",
+                        displayDate: "Pendiente de commit",
+                        message: "Eliminado del disco pero conservado en HEAD de Git",
+                        isUncommitted: true
+                    });
+                }
+            }
+            return results;
+        } catch (err) {
+            console.error("Error al consultar eliminados uncommitted en Git:", err);
+            return [];
+        }
+    }
+
+    // Mechanism 2 & Unified System: High-Performance 3-Tier Search Engine across Uncommitted + Historical Deletions
     async searchDeletedFilesFromGit(searchTerm, startDate, endDate, searchInDiff, progressCallback) {
         if (!this.isGitRepoValid) return [];
 
         const cleanTerm = (searchTerm || "").trim();
-
-        // Build Git flags: --all, --full-history, --diff-filter=D, -M (detect renames)
-        // Format date with full time string (YYYY-MM-DD HH:mm:ss) so timestamp is exact
-        const args = [
-            "log",
-            "--all",
-            "--full-history",
-            "--diff-filter=D",
-            "-M",
-            "--name-status",
-            "--pretty=format:COMMIT_HEADER:%H|%an|%ad|%s|%b",
-            "--date=format:%Y-%m-%d %H:%M:%S"
-        ];
-
-        if (searchInDiff) {
-            args.push("-p"); // Include diff patch content for deep inspection
-        }
-
-        // Strict Date Range Boundary with exact time coverage (Fixes 00:00:00 cutoff bug!)
-        if (startDate && startDate.trim()) {
-            const rawStart = startDate.trim();
-            const formattedSince = rawStart.length <= 10 ? `${rawStart} 00:00:00` : rawStart;
-            args.push(`--since=${formattedSince}`);
-        }
-        if (endDate && endDate.trim()) {
-            const rawEnd = endDate.trim();
-            const formattedUntil = rawEnd.length <= 10 ? `${rawEnd} 23:59:59` : rawEnd;
-            args.push(`--until=${formattedUntil}`);
-        }
+        const results = [];
+        const seenKeys = new Set();
 
         try {
-            if (progressCallback) progressCallback(30, true);
+            // STEP 1: Discover Uncommitted Working Tree Deletions (Mechanism 3)
+            if (progressCallback) progressCallback(15, true);
+            const uncommitted = await this.getUncommittedDeletedFiles();
+            for (const item of uncommitted) {
+                let isMatch = true;
+                if (cleanTerm) {
+                    const baseName = item.fileName.includes(".") ? item.fileName.substring(0, item.fileName.lastIndexOf(".")) : item.fileName;
+                    isMatch = 
+                        this.matchesFuzzySearchTerm(item.filePath, cleanTerm) ||
+                        this.matchesFuzzySearchTerm(item.fileName, cleanTerm) ||
+                        this.matchesFuzzySearchTerm(baseName, cleanTerm);
+                }
+                if (isMatch && !seenKeys.has(item.filePath.toLowerCase())) {
+                    seenKeys.add(item.filePath.toLowerCase());
+                    results.push(item);
+                }
+            }
+
+            // STEP 2: Discover Historical Deletions in Git History (Mechanism 2)
+            if (progressCallback) progressCallback(45, true);
+
+            // Native Git filtering flags: --diff-filter=D, -M (renames), --name-status
+            const args = [
+                "log",
+                "--all",
+                "--full-history",
+                "--diff-filter=D",
+                "-M",
+                "--name-status",
+                "--pretty=format:COMMIT_HEADER:%H|%an|%ad|%s|%b",
+                "--date=format:%Y-%m-%d %H:%M:%S"
+            ];
+
+            if (searchInDiff) {
+                args.push("-p");
+            }
+
+            // Smart Date Inversion Normalization: If start > end (e.g. start=today, end=yesterday), swap them to ensure a valid range!
+            let cleanStart = startDate ? startDate.trim() : "";
+            let cleanEnd = endDate ? endDate.trim() : "";
+
+            if (cleanStart && cleanEnd && cleanStart > cleanEnd) {
+                const temp = cleanStart;
+                cleanStart = cleanEnd;
+                cleanEnd = temp;
+            }
+
+            // Native Date Boundaries: Handle the 4 date scenarios (--since & --until) as clean array arguments
+            if (cleanStart) {
+                const formattedSince = cleanStart.length <= 10 ? `${cleanStart} 00:00:00` : cleanStart;
+                args.push("--since", formattedSince);
+            }
+            if (cleanEnd) {
+                const formattedUntil = cleanEnd.length <= 10 ? `${cleanEnd} 23:59:59` : cleanEnd;
+                args.push("--until", formattedUntil);
+            }
 
             const output = await this.execGitCommand(args);
-
             if (progressCallback) progressCallback(75, true);
 
-            const lines = output.split("\n");
-            const results = [];
-            const seenFilePaths = new Set();
+            const lines = (output || "").split("\n");
             let currentCommit = null;
             let currentCommitDiff = "";
 
@@ -1522,57 +1682,142 @@ class VaultGuardPlugin extends obsidian.Plugin {
                         body: parts[4] || ""
                     };
                     currentCommitDiff = "";
-                } else if ((trimmed.startsWith("D\t") || trimmed.startsWith("D ")) && currentCommit) {
-                    const filePath = trimmed.replace(/^D\s+/, "").trim();
-                    if (!filePath || seenFilePaths.has(filePath)) continue;
+                } else if ((trimmed.startsWith("D\t") || trimmed.startsWith("D ") || trimmed.startsWith("R\t") || trimmed.startsWith("R ")) && currentCommit) {
+                    const rawPaths = trimmed.replace(/^[DR]\d*\s+/, "").trim();
+                    const filePaths = rawPaths.split(/\t|->/).map(p => p.trim()).filter(Boolean);
 
-                    if (this.isPathIgnoredByGitignore(filePath)) continue;
+                    for (const filePath of filePaths) {
+                        if (!filePath) continue;
+                        if (this.isPathIgnoredByGitignore(filePath)) continue;
 
-                    const fileName = filePath.substring(filePath.lastIndexOf("/") + 1);
-                    const baseName = fileName.includes(".") ? fileName.substring(0, fileName.lastIndexOf(".")) : fileName;
-                    const ext = fileName.includes(".") ? fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase() : "md";
+                        const fileName = filePath.substring(filePath.lastIndexOf("/") + 1);
+                        const baseName = fileName.includes(".") ? fileName.substring(0, fileName.lastIndexOf(".")) : fileName;
+                        const ext = fileName.includes(".") ? fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase() : "md";
 
-                    // STRICT RULE: Only search and return protected formats / .md files. Any non-protected format is excluded!
-                    if (ext !== "md" && !this.isProtectedExtension(ext)) continue;
+                        // STRICT RULE: Only search and return protected formats / .md files!
+                        if (ext !== "md" && !this.isProtectedExtension(ext)) continue;
 
-                    // Multi-flag search matcher: checks path, filename, basename, extension, commit message, author
-                    let isMatch = true;
+                        const key = `${filePath.toLowerCase()}:${currentCommit.hash}`;
+                        if (seenKeys.has(key)) continue;
 
-                    if (cleanTerm) {
-                        isMatch = 
-                            this.matchesFuzzySearchTerm(filePath, cleanTerm) ||
-                            this.matchesFuzzySearchTerm(fileName, cleanTerm) ||
-                            this.matchesFuzzySearchTerm(baseName, cleanTerm) ||
-                            this.matchesFuzzySearchTerm(ext, cleanTerm) ||
-                            this.matchesFuzzySearchTerm(currentCommit.subject, cleanTerm) ||
-                            this.matchesFuzzySearchTerm(currentCommit.body, cleanTerm) ||
-                            this.matchesFuzzySearchTerm(currentCommit.author, cleanTerm);
+                        let isMatch = true;
+                        if (cleanTerm) {
+                            isMatch = 
+                                this.matchesFuzzySearchTerm(filePath, cleanTerm) ||
+                                this.matchesFuzzySearchTerm(fileName, cleanTerm) ||
+                                this.matchesFuzzySearchTerm(baseName, cleanTerm) ||
+                                this.matchesFuzzySearchTerm(ext, cleanTerm) ||
+                                this.matchesFuzzySearchTerm(currentCommit.subject, cleanTerm) ||
+                                this.matchesFuzzySearchTerm(currentCommit.body, cleanTerm) ||
+                                this.matchesFuzzySearchTerm(currentCommit.author, cleanTerm);
 
-                        if (!isMatch && searchInDiff && currentCommitDiff) {
-                            isMatch = this.matchesFuzzySearchTerm(currentCommitDiff, cleanTerm);
+                            if (!isMatch && searchInDiff && currentCommitDiff) {
+                                isMatch = this.matchesFuzzySearchTerm(currentCommitDiff, cleanTerm);
+                            }
                         }
-                    }
 
-                    if (isMatch) {
-                        seenFilePaths.add(filePath);
-                        results.push({
-                            commitHash: currentCommit.hash,
-                            author: currentCommit.author,
-                            date: currentCommit.date,
-                            displayDate: currentCommit.displayDate,
-                            message: currentCommit.subject || currentCommit.body || "Commit de Git",
-                            filePath: filePath,
-                            fileName: fileName,
-                            parentCommitHash: `${currentCommit.hash}^`
-                        });
+                        if (isMatch) {
+                            seenKeys.add(key);
+                            results.push({
+                                id: `historical:${currentCommit.hash}:${filePath}`,
+                                type: "historical",
+                                badgeLabel: "Eliminado en Commit",
+                                badgeCls: "vg-status-historical",
+                                commitHash: currentCommit.hash,
+                                restoreSpec: `${currentCommit.hash}~1`,
+                                author: currentCommit.author,
+                                date: currentCommit.date,
+                                displayDate: currentCommit.displayDate,
+                                message: currentCommit.subject || currentCommit.body || "Commit de Git",
+                                filePath: filePath,
+                                fileName: fileName
+                            });
+                        }
                     }
                 } else if (searchInDiff && currentCommit) {
                     currentCommitDiff += " " + line;
                 }
             }
 
-            // Sort most recent date first
-            results.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+            // FALLBACK CAUSE FIX: If historical diff-filter=D returned 0 results and user specified a searchTerm,
+            // run a secondary fallback search across all commits (A/M/R) and check which files no longer exist at HEAD!
+            if (results.length === 0 && cleanTerm) {
+                const fallbackArgs = [
+                    "log",
+                    "--all",
+                    "--full-history",
+                    "-M",
+                    "--name-status",
+                    "--pretty=format:COMMIT_HEADER:%H|%an|%ad|%s|%b",
+                    "--date=format:%Y-%m-%d %H:%M:%S"
+                ];
+
+                if (cleanStart) fallbackArgs.push("--since", cleanStart.length <= 10 ? `${cleanStart} 00:00:00` : cleanStart);
+                if (cleanEnd) fallbackArgs.push("--until", cleanEnd.length <= 10 ? `${cleanEnd} 23:59:59` : cleanEnd);
+
+                const fallbackOutput = await this.execGitCommand(fallbackArgs);
+                const fbLines = (fallbackOutput || "").split("\n");
+                let fbCommit = null;
+
+                for (let i = 0; i < fbLines.length; i++) {
+                    const fbLine = fbLines[i].trim();
+                    if (fbLine.startsWith("COMMIT_HEADER:")) {
+                        const parts = fbLine.substring("COMMIT_HEADER:".length).split("|");
+                        fbCommit = { hash: parts[0] || "", author: parts[1] || "", date: parts[2] || "", displayDate: parts[2] || "", subject: parts[3] || "" };
+                    } else if (fbCommit && /^[AMDCR]\d*\s+/.test(fbLine)) {
+                        const statusMatch = fbLine.match(/^([AMDCR]\d*)\s+(.+)$/);
+                        if (statusMatch) {
+                            const filePaths = statusMatch[2].split(/\t|->/).map(p => p.trim()).filter(Boolean);
+                            for (const filePath of filePaths) {
+                                const cleanPath = filePath.replace(/^"|"$/g, "").trim();
+                                if (!cleanPath || this.isPathIgnoredByGitignore(cleanPath)) continue;
+                                const fileName = cleanPath.substring(cleanPath.lastIndexOf("/") + 1);
+                                const baseName = fileName.includes(".") ? fileName.substring(0, fileName.lastIndexOf(".")) : fileName;
+                                const ext = fileName.includes(".") ? fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase() : "md";
+
+                                if (ext !== "md" && !this.isProtectedExtension(ext)) continue;
+
+                                if (this.matchesFuzzySearchTerm(cleanPath, cleanTerm) || this.matchesFuzzySearchTerm(fileName, cleanTerm) || this.matchesFuzzySearchTerm(baseName, cleanTerm)) {
+                                    // Check if file is missing at HEAD (i.e. deleted)
+                                    let existsAtHead = false;
+                                    try {
+                                        const lsCheck = await this.execGitCommand(["ls-tree", "HEAD", "--", cleanPath]);
+                                        existsAtHead = (lsCheck || "").trim().length > 0;
+                                    } catch (e) {}
+
+                                    if (!existsAtHead) {
+                                        const key = `${cleanPath.toLowerCase()}:${fbCommit.hash}`;
+                                        if (!seenKeys.has(key)) {
+                                            seenKeys.add(key);
+                                            results.push({
+                                                id: `historical:${fbCommit.hash}:${cleanPath}`,
+                                                type: "historical",
+                                                badgeLabel: "Eliminado en Commit",
+                                                badgeCls: "vg-status-historical",
+                                                commitHash: fbCommit.hash,
+                                                restoreSpec: `${fbCommit.hash}`,
+                                                author: fbCommit.author,
+                                                date: fbCommit.date,
+                                                displayDate: fbCommit.displayDate,
+                                                message: fbCommit.subject || "Commit de Git",
+                                                filePath: cleanPath,
+                                                fileName: fileName
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sort results: uncommitted first, then historical by date descending
+            results.sort((a, b) => {
+                if (a.isUncommitted && !b.isUncommitted) return -1;
+                if (!a.isUncommitted && b.isUncommitted) return 1;
+                return (b.date || "").localeCompare(a.date || "");
+            });
 
             if (progressCallback) progressCallback(100, false);
 
@@ -1580,42 +1825,78 @@ class VaultGuardPlugin extends obsidian.Plugin {
         } catch (err) {
             if (progressCallback) progressCallback(100, false);
             new obsidian.Notice(`[Vault Guard] ${err.message}`);
-            console.error("Error al buscar eliminados en Git:", err);
+            console.error("Error en búsqueda unificada Git:", err);
             return [];
         }
     }
 
-    // Git Operations: Restore file content at commit right before deletion (Strict Native Semantic Notice Output!)
-    async restoreFileFromGitCommit(filePath, commitHash) {
+    // Safe Read-Only Extraction & Non-Destructive Working Tree Restoration
+    async restoreFileFromGitResult(item) {
+        if (!item || !item.filePath) return false;
+
         try {
-            const descriptor = this.getEntityDescriptor(filePath);
+            const descriptor = this.getEntityDescriptor(item.filePath);
             new obsidian.Notice(`Extrayendo contenido de '${descriptor.name}' desde Git...`);
 
-            // Target commit right before deletion is commitHash^
-            const targetCommit = `${commitHash}^`;
-            const content = await this.execGitCommand(["show", `${targetCommit}:${filePath}`]);
+            let content = null;
 
-            // Ensure parent dir exists
+            if (item.type === "uncommitted") {
+                // Non-destructive read of file at HEAD (working tree remains intact)
+                content = await this.execGitCommand(["show", `HEAD:${item.filePath}`]);
+            } else {
+                // Historical deletion recovery: try restoreSpec (e.g. commit~1:filePath)
+                const spec = item.restoreSpec || `${item.commitHash}~1`;
+                try {
+                    content = await this.execGitCommand(["show", `${spec}:${item.filePath}`]);
+                } catch (err1) {
+                    // Fallback 1: try exact commit
+                    try {
+                        content = await this.execGitCommand(["show", `${item.commitHash}:${item.filePath}`]);
+                    } catch (err2) {
+                        // Fallback 2: try ls-tree matching
+                        try {
+                            const cleanCommit = spec.replace(/~1$/, "").replace(/\^$/, "");
+                            const treeOutput = await this.execGitCommand(["ls-tree", "-r", "--name-only", cleanCommit]);
+                            const treeFiles = treeOutput.split("\n").map(f => f.trim()).filter(Boolean);
+                            const matched = treeFiles.find(f => f.toLowerCase().endsWith(descriptor.name.toLowerCase()));
+                            if (matched) {
+                                content = await this.execGitCommand(["show", `${cleanCommit}:${matched}`]);
+                            } else {
+                                throw err2;
+                            }
+                        } catch (err3) {
+                            throw err2;
+                        }
+                    }
+                }
+            }
+
+            if (content === null || content === undefined) {
+                throw new Error(`No se pudo extraer el contenido de '${item.filePath}'.`);
+            }
+
+            // Ensure parent directory exists in vault
             const adapter = this.app.vault.adapter;
-            const parentDir = filePath.substring(0, filePath.lastIndexOf("/"));
+            const parentDir = item.filePath.substring(0, item.filePath.lastIndexOf("/"));
             if (parentDir && !(await adapter.exists(parentDir))) {
                 await this.app.vault.createFolder(parentDir);
             }
 
-            // Check if file already exists in vault
-            const existingFile = this.app.vault.getAbstractFileByPath(filePath);
+            // Write or modify file in vault (working tree remains untouched!)
+            const existingFile = this.app.vault.getAbstractFileByPath(item.filePath);
             if (existingFile instanceof obsidian.TFile) {
                 await this.app.vault.modify(existingFile, content);
             } else {
-                await this.app.vault.create(filePath, content);
+                await this.app.vault.create(item.filePath, content);
             }
 
-            const label = `${descriptor.article} ${descriptor.noun} '${descriptor.name}' ${descriptor.verbRestored} desde Git (Commit ${commitHash.substring(0, 7)}).`;
+            const sourceText = item.type === "uncommitted" ? "estado uncommitted (working tree protegido)" : `commit ${item.commitHash.substring(0, 7)}`;
+            const label = `${descriptor.article} ${descriptor.noun} '${descriptor.name}' ${descriptor.verbRestored} exitosamente desde ${sourceText}.`;
             new obsidian.Notice(label);
             return true;
         } catch (err) {
-            console.error("Error al restaurar archivo desde Git:", err);
-            new obsidian.Notice(`Error al restaurar desde Git: ${err.message}`);
+            console.error("Error al restaurar desde Git:", err);
+            new obsidian.Notice(`[Vault Guard] Error al restaurar desde Git: ${err.message}`);
             return false;
         }
     }
@@ -1920,7 +2201,7 @@ class VaultGuardView extends obsidian.ItemView {
             });
         }
 
-        // 3. Shared Filter Panel (Search term + Date Range with Calendar Pickers)
+        // 3. Shared Filter Panel (Search term, Date range, Pickers & Search button)
         const filterPanel = container.createDiv({ cls: "vg-filter-panel" });
 
         // Search Term Input Row
@@ -1947,60 +2228,14 @@ class VaultGuardView extends obsidian.ItemView {
             });
             clearBtn.addEventListener("click", async () => {
                 if (confirm("¿Deseas vaciar el historial de eliminaciones de Vault Guard?")) {
+                    this.plugin.dismissAllHistoryItems();
                     this.plugin.settings.deletedHistory = [];
                     await this.plugin.saveSettings();
                     this.render();
                 }
             });
-        }
 
-        // Date Range Row with Calendar Picker Buttons (📅 r-calendar style)
-        const dateRangeRow = filterPanel.createDiv({ cls: "vg-date-range-row" });
-
-        // Start Date Field
-        const startField = dateRangeRow.createDiv({ cls: "vg-date-field" });
-        startField.createEl("label", { text: "Fecha Inicio:" });
-        const startGroup = startField.createDiv({ cls: "vg-date-input-group" });
-        const startInput = startGroup.createEl("input", {
-            type: "text",
-            placeholder: "YYYY-MM-DD",
-            value: this.gitStartDate
-        });
-        startInput.addEventListener("input", (e) => {
-            this.gitStartDate = e.target.value;
-        });
-
-        const startPickBtn = startGroup.createEl("button", { cls: "vg-btn-picker", text: "📅" });
-        startPickBtn.addEventListener("click", () => {
-            new GitDatePickerModal(this.app, (selectedDate) => {
-                this.gitStartDate = selectedDate;
-                startInput.value = selectedDate;
-            }).open();
-        });
-
-        // End Date Field
-        const endField = dateRangeRow.createDiv({ cls: "vg-date-field" });
-        endField.createEl("label", { text: "Fecha Fin:" });
-        const endGroup = endField.createDiv({ cls: "vg-date-input-group" });
-        const endInput = endGroup.createEl("input", {
-            type: "text",
-            placeholder: "YYYY-MM-DD",
-            value: this.gitEndDate
-        });
-        endInput.addEventListener("input", (e) => {
-            this.gitEndDate = e.target.value;
-        });
-
-        const endPickBtn = endGroup.createEl("button", { cls: "vg-btn-picker", text: "📅" });
-        endPickBtn.addEventListener("click", () => {
-            new GitDatePickerModal(this.app, (selectedDate) => {
-                this.gitEndDate = selectedDate;
-                endInput.value = selectedDate;
-            }).open();
-        });
-
-        // Explicit Action Button for Local Log Tab
-        if (this.activeTab === "log") {
+            // Action Button for Local Log Tab
             const searchLocalBtn = filterPanel.createEl("button", {
                 cls: "vg-btn vg-btn-restore vg-btn-search-git",
                 text: "Buscar en Historial Local"
@@ -2008,12 +2243,57 @@ class VaultGuardView extends obsidian.ItemView {
 
             searchLocalBtn.addEventListener("click", () => {
                 this.activeLocalSearchQuery = (this.localSearchTerm || "").toLowerCase().trim();
-                this.renderLogList(logContainer);
+                this.renderLogList(this.logContainer);
             });
         }
 
-        // Checkbox Row & Sleek Progress Bar for Git Tab
+        // Date Range Row & Checkbox & Progress Bar — Strictly for Git Tab!
         if (this.activeTab === "git") {
+            const dateRangeRow = filterPanel.createDiv({ cls: "vg-date-range-row" });
+
+            // Start Date Field
+            const startField = dateRangeRow.createDiv({ cls: "vg-date-field" });
+            startField.createEl("label", { text: "Fecha Inicio:" });
+            const startGroup = startField.createDiv({ cls: "vg-date-input-group" });
+            const startInput = startGroup.createEl("input", {
+                type: "text",
+                placeholder: "YYYY-MM-DD",
+                value: this.gitStartDate
+            });
+            startInput.addEventListener("input", (e) => {
+                this.gitStartDate = e.target.value;
+            });
+
+            const startPickBtn = startGroup.createEl("button", { cls: "vg-btn-picker", text: "📅" });
+            startPickBtn.addEventListener("click", () => {
+                new GitDatePickerModal(this.app, (selectedDate) => {
+                    this.gitStartDate = selectedDate;
+                    startInput.value = selectedDate;
+                }).open();
+            });
+
+            // End Date Field
+            const endField = dateRangeRow.createDiv({ cls: "vg-date-field" });
+            endField.createEl("label", { text: "Fecha Fin:" });
+            const endGroup = endField.createDiv({ cls: "vg-date-input-group" });
+            const endInput = endGroup.createEl("input", {
+                type: "text",
+                placeholder: "YYYY-MM-DD",
+                value: this.gitEndDate
+            });
+            endInput.addEventListener("input", (e) => {
+                this.gitEndDate = e.target.value;
+            });
+
+            const endPickBtn = endGroup.createEl("button", { cls: "vg-btn-picker", text: "📅" });
+            endPickBtn.addEventListener("click", () => {
+                new GitDatePickerModal(this.app, (selectedDate) => {
+                    this.gitEndDate = selectedDate;
+                    endInput.value = selectedDate;
+                }).open();
+            });
+
+            // Checkbox Row & Progress Bar for Git Tab
             const diffCheckRow = filterPanel.createDiv({ cls: "vg-checkbox-row" });
             const diffCheckbox = diffCheckRow.createEl("input", {
                 type: "checkbox",
@@ -2035,14 +2315,13 @@ class VaultGuardView extends obsidian.ItemView {
             });
 
             searchBtn.addEventListener("click", async () => {
-                this.triggerGitSearch(logContainer);
+                this.triggerGitSearch();
             });
 
-            // Progress Bar Container BELOW the button (Subtle gray by default, activates vibrant on search)
+            // Progress Bar Container
             const progressContainer = filterPanel.createDiv({ cls: "vg-progress-container" });
             this.progressBarFill = progressContainer.createDiv({ cls: "vg-progress-bar-fill" });
 
-            // Persist 100% state from previous completed search, or 0% if never searched
             if (this.hasSearchedGit && !this.isGitSearching) {
                 this.progressBarFill.style.width = "100%";
                 this.progressBarFill.addClass("completed");
@@ -2050,22 +2329,23 @@ class VaultGuardView extends obsidian.ItemView {
                 this.progressBarFill.style.width = "0%";
             }
 
-            // Percentage label inside the progress bar
             this.progressLabel = progressContainer.createDiv({ cls: "vg-progress-label" });
             this.progressLabel.setText(this.hasSearchedGit && !this.isGitSearching ? "100%" : "");
         }
 
-        // 4. Scrollable Log Container Box
-        const logContainer = container.createDiv({ cls: "vg-log-container" });
+        // 4. Scrollable Log Container Box (Created BELOW filterPanel in DOM)
+        this.logContainer = container.createDiv({ cls: "vg-log-container" });
 
         if (this.activeTab === "git" && this.plugin.isGitRepoValid && this.plugin.settings.enableGitIntegration) {
-            this.renderGitResults(logContainer);
+            this.renderGitResults(this.logContainer);
         } else {
-            this.renderLogList(logContainer);
+            this.renderLogList(this.logContainer);
         }
     }
 
-    async triggerGitSearch(logContainer) {
+    async triggerGitSearch(targetContainer) {
+        const logContainer = targetContainer || this.logContainer;
+        if (!logContainer) return;
         // CONCURRENT SEARCH LOCK: Prevent multiple simultaneous searches in Git repository
         if (this.isGitSearching) {
             new obsidian.Notice("[Vault Guard] Ya hay una búsqueda en Git en ejecución. Por favor espera a que finalice.");
@@ -2165,28 +2445,31 @@ class VaultGuardView extends obsidian.ItemView {
 
             const mainRow = card.createDiv({ cls: "vg-log-card-main" });
             const iconEl = mainRow.createDiv({ cls: "vg-log-icon" });
-            obsidian.setIcon(iconEl, "git-commit");
+            obsidian.setIcon(iconEl, item.isUncommitted ? "file-minus" : "git-commit");
 
             const detailsEl = mainRow.createDiv({ cls: "vg-log-details" });
             detailsEl.createDiv({ cls: "vg-log-name", text: item.fileName });
             detailsEl.createDiv({ cls: "vg-log-path", text: item.filePath });
 
             const metaEl = detailsEl.createDiv({ cls: "vg-log-meta" });
-            metaEl.createSpan({ cls: "vg-caller-info", text: `Commit: ${item.commitHash.substring(0, 7)}` });
+            metaEl.createSpan({ cls: `vg-status-tag ${item.badgeCls || "vg-status-historical"}`, text: item.badgeLabel || "Git Commit" });
+            if (!item.isUncommitted) {
+                metaEl.createSpan({ cls: "vg-caller-info", text: `Commit: ${(item.commitHash || "").substring(0, 7)}` });
+            }
             metaEl.createSpan({ cls: "vg-timestamp", text: `Fecha: ${item.displayDate}` });
             metaEl.createSpan({ cls: "vg-caller-info", text: `Autor: ${item.author}` });
 
             if (item.message) {
-                card.createDiv({ cls: "vg-modal-caller-process", text: `Mensaje: ${item.message}` });
+                card.createDiv({ cls: "vg-modal-caller-process", text: `Detalle: ${item.message}` });
             }
 
             const actionsEl = card.createDiv({ cls: "vg-log-actions" });
             const restoreBtn = actionsEl.createEl("button", {
-                cls: "vg-btn vg-btn-git",
-                text: "Restaurar desde Git"
+                cls: `vg-btn ${item.isUncommitted ? "vg-btn-restore" : "vg-btn-git"}`,
+                text: item.isUncommitted ? "Restaurar Eliminación Pendiente" : "Restaurar desde Git"
             });
             restoreBtn.addEventListener("click", async () => {
-                await this.plugin.restoreFileFromGitCommit(item.filePath, item.commitHash);
+                await this.plugin.restoreFileFromGitResult(item);
                 this.render();
             });
         });
@@ -2203,20 +2486,6 @@ class VaultGuardView extends obsidian.ItemView {
                 item.name.toLowerCase().includes(this.activeLocalSearchQuery) ||
                 item.path.toLowerCase().includes(this.activeLocalSearchQuery)
             );
-        }
-
-        // Apply flexible date range filtering on local log if specified
-        if (this.gitStartDate && this.gitStartDate.trim()) {
-            history = history.filter(item => {
-                const itemDate = new Date(item.deletedAt).toISOString().split("T")[0];
-                return itemDate >= this.gitStartDate.trim();
-            });
-        }
-        if (this.gitEndDate && this.gitEndDate.trim()) {
-            history = history.filter(item => {
-                const itemDate = new Date(item.deletedAt).toISOString().split("T")[0];
-                return itemDate <= this.gitEndDate.trim();
-            });
         }
 
         if (history.length === 0) {
@@ -2305,6 +2574,7 @@ class VaultGuardView extends obsidian.ItemView {
 
             const delBtn = actionsEl.createEl("button", { cls: "vg-btn vg-btn-danger", text: "Quitar" });
             delBtn.addEventListener("click", async () => {
+                this.plugin.dismissHistoryItem(item);
                 this.plugin.settings.deletedHistory = this.plugin.settings.deletedHistory.filter(i => i.id !== item.id);
                 await this.plugin.saveSettings();
                 this.render();
@@ -3079,6 +3349,7 @@ class VaultGuardSettingTab extends obsidian.PluginSettingTab {
                 .setWarning()
                 .onClick(async () => {
                     if (confirm("¿Estás seguro de que deseas vaciar el historial de eliminaciones?")) {
+                        this.plugin.dismissAllHistoryItems();
                         this.plugin.settings.deletedHistory = [];
                         await this.plugin.saveSettings();
                         new obsidian.Notice("[Vault Guard] Historial vaciado.");

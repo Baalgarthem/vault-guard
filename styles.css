@@ -507,6 +507,20 @@
     color: var(--text-error, #e74c3c);
 }
 
+.vg-status-uncommitted {
+    background-color: rgba(230, 126, 34, 0.18);
+    color: #e67e22;
+    border: 1px solid rgba(230, 126, 34, 0.4);
+    font-weight: 600;
+}
+
+.vg-status-historical {
+    background-color: rgba(52, 152, 219, 0.18);
+    color: #3498db;
+    border: 1px solid rgba(52, 152, 219, 0.4);
+    font-weight: 600;
+}
+
 /* Card Action Buttons */
 .vg-log-actions {
     display: flex;
