@@ -99,6 +99,11 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
     onunload() {
         this.unpatchVaultMethods();
+        if (this.userActivityEvents && this.boundUserActivityListener) {
+            this.userActivityEvents.forEach(evtName => {
+                window.removeEventListener(evtName, this.boundUserActivityListener, { capture: true });
+            });
+        }
         if (this.recentlyRenamedPaths) {
             this.recentlyRenamedPaths.clear();
         }
@@ -135,19 +140,19 @@ class VaultGuardPlugin extends obsidian.Plugin {
         this.lastUserInteractionType = null;
         this.lastInteractedFilePath = null;
 
-        const updateInteraction = (evt) => {
+        this.boundUserActivityListener = (evt) => {
             this.lastUserInteractionTimestamp = Date.now();
             this.lastUserInteractionType = evt ? evt.type : "user_event";
         };
 
-        const events = [
+        this.userActivityEvents = [
             "mousedown", "mouseup", "click", "contextmenu", 
             "keydown", "keyup", "pointerdown", "pointerup", 
             "touchend", "dragstart", "drop"
         ];
 
-        events.forEach(evtName => {
-            window.addEventListener(evtName, updateInteraction, { capture: true, passive: true });
+        this.userActivityEvents.forEach(evtName => {
+            window.addEventListener(evtName, this.boundUserActivityListener, { capture: true, passive: true });
         });
 
         // Register Obsidian Workspace UI Event Hooks
