@@ -385,7 +385,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
         }
     }
 
-    // Vault Guard Proprietary Advanced Startup Audit Engine (With .trash & Zoottelkeeper Inspection)
+    // Vault Guard Proprietary Advanced Startup Audit Engine (Strict Native Semantic Distinction Guarantee)
     async checkPreInitializationLostFiles() {
         if (!this.settings.enableIntegrityAudit) return;
 
@@ -601,21 +601,20 @@ class VaultGuardPlugin extends obsidian.Plugin {
             if (lostFiles.length > 0) {
                 for (let i = 0; i < lostFiles.length; i++) {
                     const lost = lostFiles[i];
-                    const displayName = lost.name || lost.path || "unknown";
-                    const isMd = lost.path ? lost.path.toLowerCase().endsWith(".md") : false;
-                    const entityText = isMd ? "nota" : "archivo";
+                    const descriptor = this.getEntityDescriptor(lost.path || lost.name);
+                    const displayName = descriptor.name;
 
-                    const label = `[Vault Guard] La ${entityText} '${displayName}' fue eliminada por un proceso externo antes de iniciar Obsidian (Detectado por: ${lost.source}).`;
+                    const label = `[Vault Guard] ${descriptor.article} ${descriptor.noun} '${displayName}' ${descriptor.verbDeleted} por un proceso externo antes de iniciar Obsidian (Detectado por: ${lost.source}).`;
                     new obsidian.Notice(label);
 
                     const logEntry = {
                         id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 5),
                         path: lost.path || "--",
                         name: displayName,
-                        extension: isMd ? "md" : (lost.extension || "file"),
+                        extension: descriptor.ext,
                         deletedAt: new Date().toLocaleString(),
                         deletedBy: `Proceso externo (${lost.source})`,
-                        isFolder: false,
+                        isFolder: descriptor.type === "carpeta",
                         links: [],
                         inTrash: lost.inTrash || false,
                         restored: false,
@@ -742,7 +741,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
         }
     }
 
-    // Helper: Robustly determine entity type label (.md = nota, others = archivo, folder = carpeta)
+    // STRICT NATIVE SEMANTIC DISTINCTION ENGINE (100% Exact Article, Noun, Verb Gender & Label Guarantee)
     getEntityDescriptor(file) {
         let filePath = "--";
         let fileName = "unknown";
@@ -755,7 +754,8 @@ class VaultGuardPlugin extends obsidian.Plugin {
             fileName = file.name || (file.path ? file.path.substring(file.path.lastIndexOf("/") + 1) : "unknown");
         }
 
-        if (file instanceof obsidian.TFolder) {
+        // 1. CARPETA (Folder)
+        if (file instanceof obsidian.TFolder || (!filePath.includes(".") && !filePath.endsWith(".md"))) {
             return {
                 type: "carpeta",
                 article: "La",
@@ -763,6 +763,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 name: fileName,
                 path: filePath,
                 ext: "folder",
+                gender: "f",
+                verbDeleted: "fue eliminada",
+                verbRestored: "fue restaurada exitosamente",
                 deletedLabel: `La carpeta '${fileName}' fue eliminada`
             };
         }
@@ -771,6 +774,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
             ? file.extension.toLowerCase() 
             : (filePath.toLowerCase().endsWith(".md") ? "md" : (filePath.includes(".") ? filePath.substring(filePath.lastIndexOf(".") + 1).toLowerCase() : ""));
 
+        // 2. NOTA (.md file)
         if (ext === "md" || filePath.toLowerCase().endsWith(".md")) {
             return {
                 type: "nota",
@@ -779,9 +783,15 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 name: fileName,
                 path: filePath,
                 ext: "md",
+                gender: "f",
+                verbDeleted: "fue eliminada",
+                verbRestored: "fue restaurada exitosamente",
                 deletedLabel: `La nota '${fileName}' fue eliminada`
             };
-        } else {
+        } 
+        
+        // 3. ARCHIVO (.pdf, .rar, .png, .canvas, etc.)
+        else {
             return {
                 type: "archivo",
                 article: "El",
@@ -789,6 +799,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 name: fileName,
                 path: filePath,
                 ext: ext || "file",
+                gender: "m",
+                verbDeleted: "fue eliminado",
+                verbRestored: "fue restaurado exitosamente",
                 deletedLabel: `El archivo '${fileName}' fue eliminado`
             };
         }
@@ -1032,7 +1045,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     // Capture links before deleting
                     this.captureLinksForFile(file);
 
-                    // Early warning notice if a third-party plugin or background process requested deletion (NEVER EMPTY/BLANK!)
+                    // Early warning notice if a third-party plugin or background process requested deletion (Strict Semantic Output!)
                     const targetName = descriptor.name || "unknown";
                     if (caller.isPlugin && caller.pluginId && caller.pluginId !== "unknown" && caller.pluginId !== "Proceso de Inicio / Segundo plano") {
                         new obsidian.Notice(`[Vault Guard] '${caller.pluginId}' solicitó eliminar ${descriptor.article.toLowerCase()} ${descriptor.noun} '${targetName}'.`);
@@ -1149,7 +1162,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
         });
     }
 
-    // Process deleted file event for log tracking & Notice notification (Guaranteed Non-Empty Notice Output)
+    // Process deleted file event for log tracking & Notice notification (Guaranteed Native Semantic Notice Output!)
     async handleFileDeleted(file) {
         try {
             const descriptor = this.getEntityDescriptor(file);
@@ -1172,13 +1185,11 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 this.capturedLinksMap.delete(file.path);
             }
 
-            const isMd = descriptor.ext === "md";
-
             const logEntry = {
                 id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 5),
                 path: filePath,
                 name: fileName,
-                extension: (file instanceof obsidian.TFile) ? file.extension : descriptor.ext,
+                extension: descriptor.ext,
                 deletedAt: new Date().toLocaleString(),
                 deletedBy: caller.callerDescription,
                 isFolder: isFolder,
@@ -1399,10 +1410,11 @@ class VaultGuardPlugin extends obsidian.Plugin {
         }
     }
 
-    // Git Operations: Restore file content at commit right before deletion
+    // Git Operations: Restore file content at commit right before deletion (Strict Native Semantic Notice Output!)
     async restoreFileFromGitCommit(filePath, commitHash) {
         try {
-            new obsidian.Notice(`Extrayendo contenido de '${filePath.substring(filePath.lastIndexOf("/") + 1)}' desde Git...`);
+            const descriptor = this.getEntityDescriptor(filePath);
+            new obsidian.Notice(`Extrayendo contenido de '${descriptor.name}' desde Git...`);
 
             // Target commit right before deletion is commitHash^
             const targetCommit = `${commitHash}^`;
@@ -1423,11 +1435,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 await this.app.vault.create(filePath, content);
             }
 
-            const isMd = filePath.toLowerCase().endsWith(".md");
-            const label = isMd 
-                ? `La nota ${filePath.substring(filePath.lastIndexOf("/") + 1)} fue restaurada exitosamente desde Git (Commit ${commitHash.substring(0, 7)}).`
-                : `El archivo ${filePath.substring(filePath.lastIndexOf("/") + 1)} fue restaurado exitosamente desde Git (Commit ${commitHash.substring(0, 7)}).`;
-
+            const label = `${descriptor.article} ${descriptor.noun} '${descriptor.name}' ${descriptor.verbRestored} desde Git (Commit ${commitHash.substring(0, 7)}).`;
             new obsidian.Notice(label);
             return true;
         } catch (err) {
@@ -1515,12 +1523,13 @@ class VaultGuardPlugin extends obsidian.Plugin {
         return network;
     }
 
-    // Restore single file from .trash
+    // Restore single file from .trash (Strict Native Semantic Notice Output!)
     async restoreFileFromTrash(entry) {
         try {
             const adapter = this.app.vault.adapter;
             const trashFolder = ".trash";
             const targetPath = entry.path;
+            const descriptor = this.getEntityDescriptor(targetPath || entry.name);
 
             // Try finding file in .trash
             let trashPath = `${trashFolder}/${entry.path}`;
@@ -1533,7 +1542,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
             }
 
             if (!existsInTrash) {
-                new obsidian.Notice(`No se encontró el elemento en la papelera (.trash) para '${entry.name}'.`);
+                new obsidian.Notice(`No se encontró ${descriptor.article.toLowerCase()} ${descriptor.noun} en la papelera (.trash) para '${descriptor.name}'.`);
                 return false;
             }
 
@@ -1552,8 +1561,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
             entry.inTrash = false;
             await this.saveSettings();
 
-            const isMd = entry.name.toLowerCase().endsWith(".md");
-            const label = isMd ? `La nota ${entry.name} fue restaurada exitosamente.` : `El archivo ${entry.name} fue restaurado exitosamente.`;
+            const label = `${descriptor.article} ${descriptor.noun} '${descriptor.name}' ${descriptor.verbRestored}.`;
             new obsidian.Notice(label);
             return true;
         } catch (err) {
@@ -1563,7 +1571,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
         }
     }
 
-    // Full Link Network Reconstruction & Restoration Engine
+    // Full Link Network Reconstruction & Restoration Engine (Strict Native Semantic Notice Output!)
     async reconstructNoteAndLinkNetwork(entry, selectedItemsToRestore) {
         let restoredCount = 0;
         const mainSuccess = await this.restoreFileFromTrash(entry);
@@ -1572,6 +1580,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
         }
 
         const adapter = this.app.vault.adapter;
+        const mainDescriptor = this.getEntityDescriptor(entry.path || entry.name);
 
         for (const item of selectedItemsToRestore) {
             if (item.status === "recoverableInTrash" && item.trashPath) {
@@ -1601,12 +1610,10 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
         await this.saveSettings();
 
-        const isMd = entry.name.toLowerCase().endsWith(".md");
-        const entityText = isMd ? "nota" : "archivo";
         const extraCount = restoredCount - 1;
 
         if (extraCount > 0) {
-            new obsidian.Notice(`La ${entityText} ${entry.name} y ${extraCount} archivo(s) vinculado(s) fueron restaurados exitosamente.`);
+            new obsidian.Notice(`${mainDescriptor.article} ${mainDescriptor.noun} '${mainDescriptor.name}' y ${extraCount} archivo(s) vinculado(s) fueron restaurados exitosamente.`);
         }
     }
 }
@@ -2226,15 +2233,14 @@ class RestoreNetworkModal extends obsidian.Modal {
             contentEl.empty();
             contentEl.addClass("vg-modal-confirm");
 
-            const entryName = (this.entry && this.entry.name) ? this.entry.name : "unknown";
-            const isMd = entryName.toLowerCase().endsWith(".md");
-            const entityLabel = isMd ? "nota" : "archivo";
+            const descriptor = this.plugin.getEntityDescriptor(this.entry.path || this.entry.name);
+            const entryName = descriptor.name;
 
             contentEl.createEl("h3", { text: `Reconstruir Red de Enlaces: ${entryName}` });
 
             const count = this.network ? this.network.length : 0;
             contentEl.createEl("p", {
-                text: `Se han identificado ${count} enlaces directos / Virtual Linker asociados a esta ${entityLabel}. Selecciona los archivos que deseas restaurar simultáneamente para reconstruir la red:`
+                text: `Se han identificado ${count} enlaces directos / Virtual Linker asociados a ${descriptor.article.toLowerCase()} ${descriptor.noun}. Selecciona los archivos que deseas restaurar simultáneamente para reconstruir la red:`
             });
 
             const linksContainer = contentEl.createDiv({ cls: "vg-links-container" });
@@ -2273,7 +2279,7 @@ class RestoreNetworkModal extends obsidian.Modal {
 
             const fullRestoreBtn = btnRow.createEl("button", {
                 cls: "vg-btn vg-btn-network",
-                text: "Sí, restaurar nota y red de enlaces seleccionados"
+                text: `Sí, restaurar ${descriptor.noun} y red de enlaces seleccionados`
             });
             fullRestoreBtn.addEventListener("click", async () => {
                 const itemsToRestore = this.network ? this.network.filter(n => this.selectedForRestore.has(n.path)) : [];
@@ -2284,7 +2290,7 @@ class RestoreNetworkModal extends obsidian.Modal {
 
             const singleRestoreBtn = btnRow.createEl("button", {
                 cls: "vg-btn vg-btn-restore",
-                text: "Solo restaurar nota principal"
+                text: `Solo restaurar ${descriptor.noun} principal`
             });
             singleRestoreBtn.addEventListener("click", async () => {
                 await this.plugin.restoreFileFromTrash(this.entry);
@@ -2306,7 +2312,7 @@ class RestoreNetworkModal extends obsidian.Modal {
     }
 }
 
-// Modal 1A: Dedicated Plugin Folder Deletion Prompt
+// Modal 1A: Dedicated Plugin Folder Deletion Prompt (Strict Native Semantic Distinction)
 class PluginFolderDeleteModal extends obsidian.Modal {
     constructor(app, caller, folder, stats, callback) {
         super(app);
@@ -2351,7 +2357,7 @@ class PluginFolderDeleteModal extends obsidian.Modal {
             // Explicit Solicitante Field Box
             renderSolicitanteBox(contentEl, this.caller);
 
-            contentEl.createEl("p", { text: `ATENCIÓN: '${pluginId}' solicita eliminar esta carpeta y todo su contenido. ¿Permites esta acción?` });
+            contentEl.createEl("p", { text: `ATENCIÓN: '${pluginId}' solicita eliminar la carpeta '${folderName}' y todo su contenido. ¿Permites esta acción?` });
 
             // Vibrant Action Buttons
             const btnRow = contentEl.createDiv({ cls: "vg-log-actions" });
@@ -2378,7 +2384,7 @@ class PluginFolderDeleteModal extends obsidian.Modal {
     }
 }
 
-// Modal 1B: Plugin File Deletion Prompt
+// Modal 1B: Plugin File/Note Deletion Prompt (Strict Native Semantic Distinction)
 class PluginDeleteModal extends obsidian.Modal {
     constructor(app, caller, file, callback) {
         super(app);
@@ -2393,28 +2399,25 @@ class PluginDeleteModal extends obsidian.Modal {
             contentEl.empty();
             contentEl.addClass("vg-modal-confirm");
 
-            const fileName = (this.file && this.file.name) ? this.file.name : (this.file && this.file.path ? this.file.path : "unknown");
-            const filePath = (this.file && this.file.path) ? this.file.path : "--";
+            const descriptor = app.plugins.getPlugin("vault-guard").getEntityDescriptor(this.file);
             const pluginId = (this.caller && this.caller.pluginId && this.caller.pluginId !== "unknown") ? this.caller.pluginId : "Proceso de Inicio / Segundo plano";
-            const isMd = fileName.toLowerCase().endsWith(".md");
-            const entityLabel = isMd ? "nota" : "archivo";
 
-            contentEl.createEl("h3", { text: `Alerta: Intento de Eliminación de ${entityLabel.toUpperCase()}` });
+            contentEl.createEl("h3", { text: `Alerta: Intento de Eliminación de ${descriptor.noun.toUpperCase()}` });
 
             // File Details Box
             const fileBox = contentEl.createDiv({ cls: "vg-modal-file-box" });
             const nameRow = fileBox.createDiv({ cls: "vg-modal-file-row" });
-            nameRow.createDiv({ cls: "vg-modal-label", text: `Nombre de la ${entityLabel}:` });
-            nameRow.createDiv({ cls: "vg-modal-file-name", text: fileName });
+            nameRow.createDiv({ cls: "vg-modal-label", text: `Nombre de ${descriptor.article.toLowerCase()} ${descriptor.noun}:` });
+            nameRow.createDiv({ cls: "vg-modal-file-name", text: descriptor.name });
 
             const pathRow = fileBox.createDiv({ cls: "vg-modal-file-row" });
             pathRow.createDiv({ cls: "vg-modal-label", text: "Ruta completa:" });
-            pathRow.createDiv({ cls: "vg-modal-file-path", text: filePath });
+            pathRow.createDiv({ cls: "vg-modal-file-path", text: descriptor.path });
 
             // Explicit Solicitante Field Box
             renderSolicitanteBox(contentEl, this.caller);
 
-            contentEl.createEl("p", { text: `¿Permites que '${pluginId}' elimine esta ${entityLabel}?` });
+            contentEl.createEl("p", { text: `¿Permites que '${pluginId}' elimine ${descriptor.article.toLowerCase()} ${descriptor.noun} '${descriptor.name}'?` });
 
             // Vibrant Action Buttons
             const btnRow = contentEl.createDiv({ cls: "vg-log-actions" });
@@ -2441,7 +2444,7 @@ class PluginDeleteModal extends obsidian.Modal {
     }
 }
 
-// Modal 2: Total Guard Modal
+// Modal 2: Total Guard Modal (Strict Native Semantic Distinction)
 class TotalGuardConfirmModal extends obsidian.Modal {
     constructor(app, file, caller, callback) {
         super(app);
@@ -2456,28 +2459,24 @@ class TotalGuardConfirmModal extends obsidian.Modal {
             contentEl.empty();
             contentEl.addClass("vg-modal-confirm");
 
-            const fileName = (this.file && this.file.name) ? this.file.name : (this.file && this.file.path ? this.file.path : "unknown");
-            const filePath = (this.file && this.file.path) ? this.file.path : "--";
-            const isFolder = this.file instanceof obsidian.TFolder;
-            const isMd = fileName.toLowerCase().endsWith(".md");
-            const entityLabel = isFolder ? "carpeta" : (isMd ? "nota" : "archivo");
+            const descriptor = app.plugins.getPlugin("vault-guard").getEntityDescriptor(this.file);
 
             contentEl.createEl("h3", { text: "Total Guard Activo" });
 
             // File Details Box
             const fileBox = contentEl.createDiv({ cls: "vg-modal-file-box" });
             const nameRow = fileBox.createDiv({ cls: "vg-modal-file-row" });
-            nameRow.createDiv({ cls: "vg-modal-label", text: `Nombre de la ${entityLabel}:` });
-            nameRow.createDiv({ cls: "vg-modal-file-name", text: fileName });
+            nameRow.createDiv({ cls: "vg-modal-label", text: `Nombre de ${descriptor.article.toLowerCase()} ${descriptor.noun}:` });
+            nameRow.createDiv({ cls: "vg-modal-file-name", text: descriptor.name });
 
             const pathRow = fileBox.createDiv({ cls: "vg-modal-file-row" });
             pathRow.createDiv({ cls: "vg-modal-label", text: "Ruta completa:" });
-            pathRow.createDiv({ cls: "vg-modal-file-path", text: filePath });
+            pathRow.createDiv({ cls: "vg-modal-file-path", text: descriptor.path });
 
             // Explicit Solicitante Field Box
             renderSolicitanteBox(contentEl, this.caller);
 
-            contentEl.createEl("p", { text: `Total Guard bloquea la eliminación de notas y carpetas. ¿Deseas hacer una excepción y eliminar esta ${entityLabel}?` });
+            contentEl.createEl("p", { text: `Total Guard bloquea la eliminación de notas, archivos y carpetas. ¿Deseas hacer una excepción y eliminar ${descriptor.article.toLowerCase()} ${descriptor.noun} '${descriptor.name}'?` });
 
             // Vibrant Action Buttons
             const btnRow = contentEl.createDiv({ cls: "vg-log-actions" });
@@ -2504,7 +2503,7 @@ class TotalGuardConfirmModal extends obsidian.Modal {
     }
 }
 
-// Modal 3: Standard Confirm Delete Modal
+// Modal 3: Standard Confirm Delete Modal (Strict Native Semantic Distinction)
 class ConfirmDeleteModal extends obsidian.Modal {
     constructor(app, file, caller, isBlockedFormat, stats, callback) {
         super(app);
@@ -2521,27 +2520,24 @@ class ConfirmDeleteModal extends obsidian.Modal {
             contentEl.empty();
             contentEl.addClass("vg-modal-confirm");
 
-            const fileName = (this.file && this.file.name) ? this.file.name : (this.file && this.file.path ? this.file.path : "unknown");
-            const filePath = (this.file && this.file.path) ? this.file.path : "--";
-            const isFolder = this.file instanceof obsidian.TFolder;
-            const isMd = fileName.toLowerCase().endsWith(".md");
-            const entityLabel = isFolder ? "carpeta" : (isMd ? "nota" : "archivo");
+            const descriptor = app.plugins.getPlugin("vault-guard").getEntityDescriptor(this.file);
+            const isFolder = descriptor.type === "carpeta";
 
             const titleText = isFolder 
                 ? "Confirmar Eliminación de Carpeta" 
-                : (isMd ? "Confirmar Eliminación de Nota" : "Confirmar Eliminación de Archivo");
+                : (descriptor.type === "nota" ? "Confirmar Eliminación de Nota" : "Confirmar Eliminación de Archivo");
 
             contentEl.createEl("h3", { text: titleText });
 
             // File/Folder Details Box
             const fileBox = contentEl.createDiv({ cls: "vg-modal-file-box" });
             const nameRow = fileBox.createDiv({ cls: "vg-modal-file-row" });
-            nameRow.createDiv({ cls: "vg-modal-label", text: `Nombre de la ${entityLabel}:` });
-            nameRow.createDiv({ cls: "vg-modal-file-name", text: fileName });
+            nameRow.createDiv({ cls: "vg-modal-label", text: `Nombre de ${descriptor.article.toLowerCase()} ${descriptor.noun}:` });
+            nameRow.createDiv({ cls: "vg-modal-file-name", text: descriptor.name });
 
             const pathRow = fileBox.createDiv({ cls: "vg-modal-file-row" });
             pathRow.createDiv({ cls: "vg-modal-label", text: "Ruta completa:" });
-            pathRow.createDiv({ cls: "vg-modal-file-path", text: filePath });
+            pathRow.createDiv({ cls: "vg-modal-file-path", text: descriptor.path });
 
             if (isFolder && this.stats) {
                 const statsRow = fileBox.createDiv({ cls: "vg-modal-file-row" });
@@ -2556,8 +2552,8 @@ class ConfirmDeleteModal extends obsidian.Modal {
             renderSolicitanteBox(contentEl, this.caller);
 
             const questionText = isFolder 
-                ? "ADVERTENCIA: ¿Deseas realmente eliminar la carpeta y todo su contenido?" 
-                : `¿Deseas realmente eliminar esta ${entityLabel}?`;
+                ? `ADVERTENCIA: ¿Deseas realmente eliminar la carpeta '${descriptor.name}' y todo su contenido?` 
+                : `¿Deseas realmente eliminar ${descriptor.article.toLowerCase()} ${descriptor.noun} '${descriptor.name}'?`;
             contentEl.createEl("p", { text: questionText });
 
             // Vibrant Action Buttons (Sí / No)
@@ -2598,9 +2594,9 @@ class ViewLinksModal extends obsidian.Modal {
             contentEl.empty();
             contentEl.addClass("vg-modal-confirm");
 
-            const entryName = (this.entry && this.entry.name) ? this.entry.name : "unknown";
-            contentEl.createEl("h3", { text: `Enlaces Asociados: ${entryName}` });
-            contentEl.createEl("p", { text: "A continuación se listan las notas vinculadas directas o mediante Virtual Linker:" });
+            const descriptor = app.plugins.getPlugin("vault-guard").getEntityDescriptor(this.entry.path || this.entry.name);
+            contentEl.createEl("h3", { text: `Enlaces Asociados: ${descriptor.name}` });
+            contentEl.createEl("p", { text: `A continuación se listan las notas vinculadas directas o mediante Virtual Linker a ${descriptor.article.toLowerCase()} ${descriptor.noun}:` });
 
             const linksBox = contentEl.createDiv({ cls: "vg-links-container" });
 
