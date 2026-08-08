@@ -465,38 +465,73 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
             // ABSOLUTE ZERO FALSE POSITIVE CHECKER:
             // Checks if a file physically exists in vault abstract tree, on disk, or under any moved/renamed path
-            // FIX: basename check now requires same extension to avoid cross-format false negatives
             const fileExistsInVault = (testPath, testName, testExtension) => {
                 if (!testPath && !testName) return true;
 
                 const pathLower = (testPath || "").toLowerCase();
-                const fileName = (testName || (testPath ? testPath.substring(testPath.lastIndexOf("/") + 1) : "")).toLowerCase();
-                const baseName = fileName.includes(".") ? fileName.substring(0, fileName.lastIndexOf(".")) : fileName;
-                const extLower = (testExtension || "").toLowerCase();
+                const rawName = testName || (testPath ? testPath.substring(testPath.lastIndexOf("/") + 1) : "");
+                const fileNameLower = rawName.toLowerCase();
+                
+                let fileNameWithExt = fileNameLower;
+                if (testExtension === "md" && !fileNameWithExt.endsWith(".md")) {
+                    fileNameWithExt = `${fileNameWithExt}.md`;
+                }
+                const baseName = fileNameWithExt.includes(".") ? fileNameWithExt.substring(0, fileNameWithExt.lastIndexOf(".")) : fileNameWithExt;
+                const extLower = (testExtension || (fileNameWithExt.includes(".") ? fileNameWithExt.substring(fileNameWithExt.lastIndexOf(".") + 1) : "md")).toLowerCase();
 
                 // 1. Direct AbstractFileByPath lookup in Obsidian Vault
                 if (testPath && this.app.vault.getAbstractFileByPath(testPath)) return true;
 
-                // 2. Case-insensitive path lookup in vault file tree
+                // 2. Obsidian Native MetadataCache Link Resolver Lookup (Uses internal database!)
+                if (testPath && this.app.metadataCache.getFirstLinkpathDest(testPath, "")) return true;
+                if (rawName && this.app.metadataCache.getFirstLinkpathDest(rawName, "")) return true;
+                if (baseName && this.app.metadataCache.getFirstLinkpathDest(baseName, "")) return true;
+
+                // 3. Case-insensitive path lookup in vault file tree
                 if (pathLower && currentPaths.has(pathLower)) return true;
 
-                // 3. Vault-wide filename match (exact name including extension — Moved to another folder)
-                if (fileName && currentNames.has(fileName)) return true;
+                // 4. Vault-wide filename match (exact name including extension)
+                if (fileNameWithExt && currentNames.has(fileNameWithExt)) return true;
+                if (fileNameLower && currentNames.has(fileNameLower)) return true;
 
-                // 4. Vault-wide basename match ONLY if same extension exists (prevents Proyecto.md vs Proyecto.canvas confusion)
+                // 5. Vault-wide basename match ONLY if same extension exists
                 if (baseName && extLower && currentBasenameExtMap.has(baseName)) {
                     const existingExts = currentBasenameExtMap.get(baseName);
                     if (existingExts.has(extLower)) return true;
                 }
 
-                // 5. Git Rename/Relocation match (Renamed or moved via Git)
+                // 6. Git Rename/Relocation match (Renamed or moved via Git)
                 if (pathLower && gitRenamedOldPaths.has(pathLower)) return true;
 
-                // 6. In-memory recently renamed set
+                // 7. In-memory recently renamed set
                 if (this.recentlyRenamedPaths && (this.recentlyRenamedPaths.has(testPath) || this.recentlyRenamedPaths.has(pathLower))) return true;
 
                 return false;
             };
+
+            // AUTO-SANITIZER: Clean up any stale false-positive "archivo perdido" entries from previous sessions
+            if (this.settings.deletedHistory && this.settings.deletedHistory.length > 0) {
+                let historyChanged = false;
+                for (const entry of this.settings.deletedHistory) {
+                    if (entry.isLostFile && !entry.restored && entry.path) {
+                        const existsInVault = fileExistsInVault(entry.path, entry.name, entry.extension);
+                        let existsOnDisk = false;
+                        try {
+                            existsOnDisk = await adapter.exists(entry.path);
+                        } catch (e) {}
+
+                        if (existsInVault || existsOnDisk) {
+                            // File physically exists in vault! Auto-mark as restored to clear false positive badge
+                            entry.restored = true;
+                            entry.inTrash = false;
+                            historyChanged = true;
+                        }
+                    }
+                }
+                if (historyChanged) {
+                    await this.saveSettings();
+                }
+            }
 
             // Build set of existing history entries to prevent duplicates across restarts
             const existingHistoryPaths = new Set();
@@ -524,13 +559,10 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     if (!fileExistsInVault(prev.path, prev.name, prev.extension)) {
 
                         // FINAL PHYSICAL DISK VERIFICATION: adapter.exists() as last resort
-                        // This catches files that Obsidian hasn't indexed yet during early startup
                         let existsOnDisk = false;
                         try {
                             existsOnDisk = await adapter.exists(prev.path);
-                        } catch (diskErr) {
-                            // Silently ignore disk errors
-                        }
+                        } catch (diskErr) {}
                         if (existsOnDisk) continue;
 
                         // DEDUPLICATION: Skip if already present in deletedHistory from a previous session
@@ -600,66 +632,61 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 }
             }
 
-            // 3. Vault Guard MOC Link Graph Audit (With fixed WikiLink path resolution & Zoottelkeeper Exclusion)
-            // FIX: Only report a broken link as "archivo perdido" if the target PREVIOUSLY EXISTED in the snapshot.
-            // Otherwise it's just an unresolved link, NOT a deletion.
+            // 3. Vault Guard MOC Link Graph Audit (Uses Obsidian native MetadataCache link resolution!)
             if (this.settings.trackLinks && previousSnapshot && previousSnapshot.length > 0) {
                 const files = this.app.vault.getMarkdownFiles();
                 const scanLimit = Math.min(files.length, 300);
                 for (let i = 0; i < scanLimit; i++) {
                     const f = files[i];
                     
-                    // Skip link scanning inside Zoottelkeeper index files themselves
+                    // Skip link scanning inside Zoottelkeeper index files or MOC files themselves
                     if (this.isZoottelkeeperIndexFile(f.path, f)) continue;
 
                     try {
                         const content = await this.app.vault.cachedRead(f);
                         const wikiMatches = content.match(/\[\[([^\]|#]+)(?:[#|][^\]]+)?\]\]/g) || [];
-                        const parentFolderPath = f.parent ? f.parent.path : "";
 
                         for (const match of wikiMatches) {
                             const rawLink = match.replace(/^\[\[/, "").replace(/\]\]$/, "").split("|")[0].split("#")[0].trim();
                             if (!rawLink) continue;
 
+                            // NATIVE METADATACACHE LINK RESOLUTION: If link resolves to an existing file, IT IS NOT LOST!
+                            const nativeResolvedFile = this.app.metadataCache.getFirstLinkpathDest(rawLink, f.path);
+                            if (nativeResolvedFile) continue;
+
                             const linkFileName = rawLink.substring(rawLink.lastIndexOf("/") + 1);
                             const cleanMdName = linkFileName.endsWith(".md") ? linkFileName : `${linkFileName}.md`;
 
-                            // Resolve correct target path without path duplication
-                            let targetFullPath = cleanMdName;
-                            if (rawLink.includes("/")) {
-                                targetFullPath = rawLink.endsWith(".md") ? rawLink : `${rawLink}.md`;
-                            } else if (parentFolderPath && parentFolderPath !== "/") {
-                                targetFullPath = `${parentFolderPath}/${cleanMdName}`;
-                            }
-
                             // ALWAYS EXCLUDE ZOOTTELKEEPER MOC INDEX FILES!
-                            if (this.isZoottelkeeperIndexFile(targetFullPath) || this.isZoottelkeeperIndexFile(rawLink)) continue;
+                            if (this.isZoottelkeeperIndexFile(cleanMdName) || this.isZoottelkeeperIndexFile(rawLink)) continue;
 
                             // CRITICAL FIX: Only report as "lost" if the link target PREVIOUSLY EXISTED in the vault snapshot.
-                            // A link to [[NotaQueNuncaExistio]] is just a broken/unresolved link, NOT a deletion event.
-                            const targetPathLower = targetFullPath.toLowerCase();
+                            const targetPathLower = (rawLink.endsWith(".md") ? rawLink : `${rawLink}.md`).toLowerCase();
                             const linkFileNameLower = cleanMdName.toLowerCase();
-                            const rawLinkLower = (rawLink.endsWith(".md") ? rawLink : `${rawLink}.md`).toLowerCase();
 
                             const existedInPreviousSnapshot = 
                                 previousSnapshotPaths.has(targetPathLower) ||
-                                previousSnapshotNames.has(linkFileNameLower) ||
-                                previousSnapshotNames.has(rawLinkLower) ||
-                                previousSnapshotPaths.has(rawLinkLower);
+                                previousSnapshotNames.has(linkFileNameLower);
 
                             if (!existedInPreviousSnapshot) continue;
 
                             // IF LINKED FILE EXISTS ANYWHERE IN VAULT -> NOT LOST!
-                            if (!fileExistsInVault(targetFullPath, linkFileName, "md") && !fileExistsInVault(rawLink, rawLink, "md")) {
-                                if (!this.isPathIgnoredByGitignore(targetFullPath)) {
-                                    const ext = cleanMdName.substring(cleanMdName.lastIndexOf(".") + 1).toLowerCase();
-                                    if (this.isProtectedExtension(ext) && !lostFilesMap.has(targetFullPath)) {
-                                        // DEDUPLICATION
-                                        if (existingHistoryPaths.has(targetPathLower)) continue;
+                            if (!fileExistsInVault(rawLink, cleanMdName, "md")) {
+                                let existsOnDisk = false;
+                                try {
+                                    existsOnDisk = await adapter.exists(targetPathLower) || await adapter.exists(linkFileNameLower);
+                                } catch (e) {}
+                                if (existsOnDisk) continue;
 
-                                        lostFilesMap.set(targetFullPath, {
-                                            path: targetFullPath,
-                                            name: rawLink,
+                                if (!this.isPathIgnoredByGitignore(rawLink)) {
+                                    const ext = "md";
+                                    if (this.isProtectedExtension(ext) && !lostFilesMap.has(rawLink)) {
+                                        // DEDUPLICATION
+                                        if (existingHistoryPaths.has(targetPathLower) || existingHistoryPaths.has(linkFileNameLower)) continue;
+
+                                        lostFilesMap.set(rawLink, {
+                                            path: rawLink,
+                                            name: linkFileName,
                                             extension: "md",
                                             source: "Grafo MOC de Enlaces",
                                             inTrash: false

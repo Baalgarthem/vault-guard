@@ -11,8 +11,7 @@
     font-family: var(--font-interface);
     background-color: var(--background-primary);
     color: var(--text-normal);
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
 }
 
 /* Header & Badges */
@@ -365,8 +364,9 @@
 
 /* Dynamic Scrollable Log Container Box (Fully Flexible Without Artificial Height Caps) */
 .vg-log-container {
-    flex: 1 1 auto;
-    min-height: 140px;
+    flex: 1 1 100%;
+    min-height: 380px;
+    height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
     display: flex;
