@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS = {
     enableIntegrityAudit: true, // Proprietary Advanced Startup Audit (Vault Snapshot + MOC Graph + Git Diff)
     enableZoottelkeeperCompat: true, // Auto-detect & exclude Zoottelkeeper MOC index files
     checkTrashOnStartup: true, // Inspect .trash folder to avoid false lost-file warnings
+    onlyTrackProtectedLinkFormats: true, // Only track links pointing to protected file formats (.md, etc.)
     respectGitignore: false, // Disabled by default
     gitSearchTimeout: 10, // Timeout in seconds (default 10s)
     maxHistoryEntries: 100,
@@ -947,7 +948,8 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 pluginId = pluginMatch[1];
                 location = pluginMatch[2] ? pluginMatch[2].trim().replace(/\)$/, "") : "--";
 
-                const fnMatch = line.match(/at\s+(?:async\s+)?([^\s(]+)/);
+                // Extract function name, class method, or async process name
+                const fnMatch = line.match(/at\s+(?:async\s+)?([^\s(]+)/) || line.match(/([a-zA-Z0-9_$]+)\s*\(/);
                 if (fnMatch && fnMatch[1]) {
                     functionName = fnMatch[1];
                 }
@@ -955,9 +957,10 @@ class VaultGuardPlugin extends obsidian.Plugin {
             }
         }
 
-        // IF A THIRD-PARTY PLUGIN IS PRESENT IN CALL STACK -> IDENTIFY EXACT PLUGIN ID!
+        // IF A THIRD-PARTY PLUGIN IS PRESENT IN CALL STACK -> IDENTIFY EXACT PLUGIN ID AND PROCESS!
         if (isThirdPartyPlugin && pluginId) {
-            const fnText = (functionName && functionName !== "--") ? `función '${functionName}'` : "ejecución directa";
+            const processText = (functionName && functionName !== "--") ? functionName : "ejecución directa";
+            const fnText = (functionName && functionName !== "--") ? `proceso: '${functionName}'` : "ejecución directa";
             const locText = (location && location !== "--") ? ` (${location})` : "";
             return {
                 isPlugin: true,
@@ -967,7 +970,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 confidenceScore: 100,
                 badgeText: `Plugin: ${pluginId}`,
                 detailText: `Plugin '${pluginId}' [${fnText}${locText}]`,
-                callerDescription: `Plugin: ${pluginId} (${fnText})`
+                callerDescription: `Plugin: ${pluginId} (proceso: ${processText})`
             };
         }
 
@@ -1176,20 +1179,30 @@ class VaultGuardPlugin extends obsidian.Plugin {
     }
 
     // Capture outgoing and incoming links for a file before deletion
+    // Option to filter links strictly to protected file formats (.md, .canvas, etc.)
     captureLinksForFile(file) {
         if (!file || !file.path || !(file instanceof obsidian.TFile) || !this.settings.trackLinks) return;
 
         const links = [];
+        const filterLink = (targetPath) => {
+            if (!targetPath) return false;
+            if (!this.settings.onlyTrackProtectedLinkFormats) return true;
+            const ext = targetPath.includes(".") ? targetPath.substring(targetPath.lastIndexOf(".") + 1).toLowerCase() : "md";
+            return this.isProtectedExtension(ext) || ext === "md";
+        };
+
         const resolved = this.app.metadataCache.resolvedLinks[file.path] || {};
         for (const targetPath of Object.keys(resolved)) {
-            links.push(targetPath);
+            if (filterLink(targetPath)) {
+                links.push(targetPath);
+            }
         }
 
         // Search for backlinks
         const allResolved = this.app.metadataCache.resolvedLinks;
         for (const sourcePath of Object.keys(allResolved)) {
             if (sourcePath !== file.path && allResolved[sourcePath][file.path]) {
-                if (!links.includes(sourcePath)) {
+                if (!links.includes(sourcePath) && filterLink(sourcePath)) {
                     links.push(sourcePath);
                 }
             }
@@ -1418,11 +1431,10 @@ class VaultGuardPlugin extends obsidian.Plugin {
     async searchDeletedFilesFromGit(searchTerm, startDate, endDate, searchInDiff, progressCallback) {
         if (!this.isGitRepoValid) return [];
 
-        new obsidian.Notice("Iniciando búsqueda avanzada de archivos en el historial de Git...");
-
         const cleanTerm = (searchTerm || "").trim();
 
         // Build Git flags: --all, --full-history, --diff-filter=D, -M (detect renames)
+        // Format date with full time string (YYYY-MM-DD HH:mm:ss) so timestamp is exact
         const args = [
             "log",
             "--all",
@@ -1431,22 +1443,23 @@ class VaultGuardPlugin extends obsidian.Plugin {
             "-M",
             "--name-status",
             "--pretty=format:COMMIT_HEADER:%H|%an|%ad|%s|%b",
-            "--date=short"
+            "--date=format:%Y-%m-%d %H:%M:%S"
         ];
 
         if (searchInDiff) {
             args.push("-p"); // Include diff patch content for deep inspection
-            if (cleanTerm) {
-                args.push(`-S${cleanTerm}`); // Built-in Git pickaxe content search
-            }
         }
 
-        // Strict Date Range Boundary
+        // Strict Date Range Boundary with exact time coverage (Fixes 00:00:00 cutoff bug!)
         if (startDate && startDate.trim()) {
-            args.push(`--since=${startDate.trim()}`);
+            const rawStart = startDate.trim();
+            const formattedSince = rawStart.length <= 10 ? `${rawStart} 00:00:00` : rawStart;
+            args.push(`--since=${formattedSince}`);
         }
         if (endDate && endDate.trim()) {
-            args.push(`--until=${endDate.trim()}`);
+            const rawEnd = endDate.trim();
+            const formattedUntil = rawEnd.length <= 10 ? `${rawEnd} 23:59:59` : rawEnd;
+            args.push(`--until=${formattedUntil}`);
         }
 
         try {
@@ -1485,7 +1498,10 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
                     const fileName = filePath.substring(filePath.lastIndexOf("/") + 1);
                     const baseName = fileName.includes(".") ? fileName.substring(0, fileName.lastIndexOf(".")) : fileName;
-                    const ext = fileName.includes(".") ? fileName.substring(fileName.lastIndexOf(".") + 1) : "";
+                    const ext = fileName.includes(".") ? fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase() : "md";
+
+                    // STRICT RULE: Only search and return protected formats / .md files. Any non-protected format is excluded!
+                    if (ext !== "md" && !this.isProtectedExtension(ext)) continue;
 
                     // Multi-flag search matcher: checks path, filename, basename, extension, commit message, author
                     let isMatch = true;
@@ -2018,8 +2034,17 @@ class VaultGuardView extends obsidian.ItemView {
     }
 
     async triggerGitSearch(logContainer) {
+        // CONCURRENT SEARCH LOCK: Prevent multiple simultaneous searches in Git repository
+        if (this.isGitSearching) {
+            new obsidian.Notice("[Vault Guard] Ya hay una búsqueda en Git en ejecución. Por favor espera a que finalice.");
+            return;
+        }
+
         this.hasSearchedGit = true;
         this.isGitSearching = true;
+
+        // Synchronized Start Notice aligned with progress bar start (15%)
+        new obsidian.Notice("Iniciando búsqueda avanzada de archivos en el historial de Git...");
 
         // Reset progress bar to active searching state
         if (this.progressBarFill) {
@@ -2039,11 +2064,6 @@ class VaultGuardView extends obsidian.ItemView {
                 if (isActive) {
                     this.progressBarFill.removeClass("completed");
                     this.progressBarFill.addClass("active");
-                } else {
-                    // Search completed: transition to 100% completed state
-                    this.progressBarFill.style.width = "100%";
-                    this.progressBarFill.removeClass("active");
-                    this.progressBarFill.addClass("completed");
                 }
             }
             if (this.progressLabel) {
@@ -2051,17 +2071,21 @@ class VaultGuardView extends obsidian.ItemView {
             }
         };
 
-        this.gitResults = await this.plugin.searchDeletedFilesFromGit(
-            this.gitSearchTerm,
-            this.gitStartDate,
-            this.gitEndDate,
-            this.searchInDiff,
-            updateProgress
-        );
+        try {
+            this.gitResults = await this.plugin.searchDeletedFilesFromGit(
+                this.gitSearchTerm,
+                this.gitStartDate,
+                this.gitEndDate,
+                this.searchInDiff,
+                updateProgress
+            );
+        } catch (err) {
+            console.error("Error durante la búsqueda en Git:", err);
+        } finally {
+            this.isGitSearching = false;
+        }
 
-        this.isGitSearching = false;
-
-        // Ensure bar stays at 100% after completion
+        // Synchronized Completion: Set progress bar to 100% completed
         if (this.progressBarFill) {
             this.progressBarFill.style.width = "100%";
             this.progressBarFill.removeClass("active");
@@ -2070,6 +2094,10 @@ class VaultGuardView extends obsidian.ItemView {
         if (this.progressLabel) {
             this.progressLabel.setText("100%");
         }
+
+        const count = this.gitResults ? this.gitResults.length : 0;
+        // Synchronized End Notice aligned with progress bar completion (100%)
+        new obsidian.Notice(`[Vault Guard] Búsqueda en Git finalizada: ${count} archivo(s) encontrado(s).`);
 
         this.renderGitResults(logContainer);
     }
@@ -2978,6 +3006,18 @@ class VaultGuardSettingTab extends obsidian.PluginSettingTab {
                 .setValue(this.plugin.settings.trackLinks)
                 .onChange(async value => {
                     this.plugin.settings.trackLinks = value;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        // Setting 8.1: Filter Tracked Links Only to Protected Formats
+        new obsidian.Setting(containerEl)
+            .setName("Filtrar enlaces rastreados solo a formatos protegidos")
+            .setDesc("Al analizar las conexiones de una nota ([[WikiLinks]] y Virtual Linker), rastrea únicamente los enlaces que apunten a formatos de archivo protegidos (ej. .md, .canvas). Ignora enlaces a archivos no protegidos o de uso temporal.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.onlyTrackProtectedLinkFormats)
+                .onChange(async value => {
+                    this.plugin.settings.onlyTrackProtectedLinkFormats = value;
                     await this.plugin.saveSettings();
                 })
             );
