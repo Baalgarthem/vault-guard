@@ -14,6 +14,128 @@
     overflow: hidden;
 }
 
+/* ==========================================================================
+   ELEMENT DENSITY / SIZING TIERS (Grande, Mediano, Pequeño, Súper Pequeño)
+   ========================================================================== */
+
+/* Tier 1: Grande (Original) */
+.vault-guard-container.vg-density-large {
+    font-size: 13.5px;
+    gap: 10px;
+    padding: 10px;
+}
+.vault-guard-container.vg-density-large .vg-log-card {
+    padding: 12px;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.vault-guard-container.vg-density-large .vg-btn {
+    padding: 6px 12px;
+    font-size: 0.82em;
+}
+.vault-guard-container.vg-density-large .vg-search-input {
+    padding: 6px 10px;
+    font-size: 0.85em;
+}
+
+/* Tier 2: Mediano (Recomendado - 15% más compacto) */
+.vault-guard-container.vg-density-medium {
+    font-size: 12px;
+    gap: 7px;
+    padding: 8px;
+}
+.vault-guard-container.vg-density-medium .vg-log-card {
+    padding: 8px 10px;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+.vault-guard-container.vg-density-medium .vg-btn {
+    padding: 4px 9px;
+    font-size: 0.8em;
+}
+.vault-guard-container.vg-density-medium .vg-search-input {
+    padding: 4px 8px;
+    font-size: 0.82em;
+}
+.vault-guard-container.vg-density-medium .vg-badge {
+    padding: 1px 6px;
+    font-size: 0.7em;
+}
+.vault-guard-container.vg-density-medium .vg-tab-button {
+    padding: 4px 8px;
+    font-size: 0.78em;
+}
+
+/* Tier 3: Pequeño (Compacto) */
+.vault-guard-container.vg-density-small {
+    font-size: 11px;
+    gap: 5px;
+    padding: 6px;
+}
+.vault-guard-container.vg-density-small .vg-log-card {
+    padding: 6px 8px;
+    gap: 4px;
+    margin-bottom: 5px;
+    border-radius: 5px;
+}
+.vault-guard-container.vg-density-small .vg-btn {
+    padding: 3px 7px;
+    font-size: 0.76em;
+    border-radius: 4px;
+}
+.vault-guard-container.vg-density-small .vg-search-input {
+    padding: 3px 6px;
+    font-size: 0.78em;
+}
+.vault-guard-container.vg-density-small .vg-badge {
+    padding: 1px 5px;
+    font-size: 0.65em;
+}
+.vault-guard-container.vg-density-small .vg-tab-button {
+    padding: 3px 6px;
+    font-size: 0.74em;
+}
+.vault-guard-container.vg-density-small .vg-log-name {
+    font-size: 0.86em;
+}
+
+/* Tier 4: Súper Pequeño (Ultra Compacto) */
+.vault-guard-container.vg-density-supersmall {
+    font-size: 10px;
+    gap: 4px;
+    padding: 4px;
+}
+.vault-guard-container.vg-density-supersmall .vg-log-card {
+    padding: 4px 6px;
+    gap: 3px;
+    margin-bottom: 4px;
+    border-radius: 4px;
+}
+.vault-guard-container.vg-density-supersmall .vg-btn {
+    padding: 2px 5px;
+    font-size: 0.72em;
+    border-radius: 3px;
+}
+.vault-guard-container.vg-density-supersmall .vg-search-input {
+    padding: 2px 5px;
+    font-size: 0.74em;
+}
+.vault-guard-container.vg-density-supersmall .vg-badge {
+    padding: 0px 4px;
+    font-size: 0.6em;
+}
+.vault-guard-container.vg-density-supersmall .vg-tab-button {
+    padding: 2px 5px;
+    font-size: 0.7em;
+}
+.vault-guard-container.vg-density-supersmall .vg-log-name {
+    font-size: 0.82em;
+}
+.vault-guard-container.vg-density-supersmall .vg-log-meta {
+    gap: 4px;
+    margin-top: 2px;
+}
+
 /* Header & Badges */
 .vg-header {
     display: flex;
@@ -804,4 +926,37 @@
 .vg-link-missing {
     color: var(--text-error, #e74c3c);
     font-weight: 500;
+}
+
+/* ==========================================================================
+   OBSIDIAN MOBILE (iOS / Android) TOUCH & LAYOUT ADAPTATIONS
+   ========================================================================== */
+.is-mobile .vault-guard-container {
+    padding: 8px 6px;
+}
+
+.is-mobile .vault-guard-container .vg-btn {
+    min-height: 38px;
+    padding: 8px 14px;
+    font-size: 0.88em;
+}
+
+.is-mobile .vault-guard-container .vg-search-input {
+    min-height: 38px;
+    font-size: 0.88em;
+}
+
+.is-mobile .vault-guard-container .vg-tab-button {
+    padding: 8px 12px;
+    font-size: 0.86em;
+}
+
+.is-mobile .vg-modal-confirm {
+    padding: 16px;
+    max-width: 95vw;
+}
+
+.is-mobile .vg-modal-file-box {
+    padding: 10px;
+    gap: 6px;
 }

@@ -6,15 +6,31 @@ Version: 1.0.0
 
 "use strict";
 var obsidian = require("obsidian");
-var child_process = require("child_process");
-var path = require("path");
-var fs = require("fs");
+var child_process = null;
+try {
+    child_process = require("child_process");
+} catch (e) {
+    child_process = null;
+}
+var path = null;
+try {
+    path = require("path");
+} catch (e) {
+    path = null;
+}
+var fs = null;
+try {
+    fs = require("fs");
+} catch (e) {
+    fs = null;
+}
 
 // Settings Defaults (data.json MUST ALWAYS remain small for instant startup!)
 const DEFAULT_SETTINGS = {
     totalGuard: true,
     confirmBeforeDelete: true,
     blockedExtensions: "md",
+    elementDensity: "medium", // Options: "large", "medium", "small", "supersmall"
     notifyOnDelete: true,
     trackLinks: true,
     reconstructLinkNetwork: true,
@@ -54,6 +70,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
         // Cached Zoottelkeeper metadata structure
         this.cachedZoottelkeeperInfo = null;
+
+        // Auto-invalidation timer for in-memory caches (60s deferred cleanup)
+        this.cacheCleanupTimer = null;
 
         // Debounce timer for updating vault snapshot
         this.snapshotTimer = null;
@@ -114,10 +133,31 @@ class VaultGuardPlugin extends obsidian.Plugin {
         if (this.snapshotTimer) {
             clearTimeout(this.snapshotTimer);
         }
+        if (this.cacheCleanupTimer) {
+            clearTimeout(this.cacheCleanupTimer);
+        }
         this.gitignoreCache = null;
         this.cachedZoottelkeeperInfo = null;
         this.confirmationQueue = Promise.resolve();
         console.log("Vault Guard Plugin descargado y memoria liberada.");
+    }
+
+    scheduleCacheCleanup() {
+        if (this.cacheCleanupTimer) clearTimeout(this.cacheCleanupTimer);
+        this.cacheCleanupTimer = setTimeout(() => {
+            this.gitignoreCache = null;
+            this.cachedZoottelkeeperInfo = null;
+            this.cacheCleanupTimer = null;
+        }, 60000); // Purge inactive caches after 60 seconds
+    }
+
+    refreshView() {
+        const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_VAULT_GUARD);
+        leaves.forEach(leaf => {
+            if (leaf.view instanceof VaultGuardView) {
+                leaf.view.render();
+            }
+        });
     }
 
     async loadSettings() {
@@ -272,64 +312,75 @@ class VaultGuardPlugin extends obsidian.Plugin {
         return false;
     }
 
-    // Check if Git repository is valid in vault root
+    // Check if vault is a valid Git repository (Disabled safely on Mobile/CapacitorJS)
     checkGitRepoValid() {
+        if (obsidian.Platform.isMobile || !child_process) {
+            return false;
+        }
         try {
             const adapter = this.app.vault.adapter;
             if (adapter instanceof obsidian.FileSystemAdapter) {
                 const basePath = adapter.getBasePath();
-                const gitFolderPath = path.join(basePath, ".git");
-                return fs.existsSync(gitFolderPath);
+                if (fs && fs.existsSync) {
+                    return fs.existsSync(`${basePath}/.git`);
+                }
             }
         } catch (e) {
-            console.error("Error comprobando repositorio Git:", e);
+            console.error("Error verificando repositorio Git:", e);
         }
         return false;
     }
 
-    // In-memory cache parser for .gitignore rules
+    // Cross-platform Async Gitignore Loader (Obsidian Mobile & Desktop compatible)
+    async reloadGitignoreCache() {
+        if (!this.settings.respectGitignore) {
+            this.gitignoreCache = [];
+            return;
+        }
+        try {
+            const adapter = this.app.vault.adapter;
+            if (await adapter.exists(".gitignore")) {
+                const content = await adapter.read(".gitignore");
+                const lines = content.split(/\r?\n/);
+                const rules = [];
+                for (let line of lines) {
+                    line = line.trim();
+                    if (!line || line.startsWith("#")) continue;
+
+                    let pattern = line;
+                    let isDirOnly = pattern.endsWith("/");
+                    if (isDirOnly) pattern = pattern.slice(0, -1);
+                    if (pattern.startsWith("/")) pattern = pattern.slice(1);
+
+                    const regexStr = "^" + pattern
+                        .replace(/\./g, "\\.")
+                        .replace(/\*/g, ".*")
+                        .replace(/\?/g, ".") + (isDirOnly ? "(?:/.*)?$" : "(?:/.*)?$");
+
+                    rules.push({ regex: new RegExp(regexStr, "i"), pattern: pattern });
+                }
+                this.gitignoreCache = rules;
+                return;
+            }
+        } catch (e) {
+            console.error("Error leyendo .gitignore:", e);
+        }
+        this.gitignoreCache = [];
+    }
+
     getGitignoreRules() {
         if (this.gitignoreCache !== null) {
+            this.scheduleCacheCleanup();
             return this.gitignoreCache;
         }
         if (!this.settings.respectGitignore) {
             this.gitignoreCache = [];
             return this.gitignoreCache;
         }
-        try {
-            const adapter = this.app.vault.adapter;
-            if (adapter instanceof obsidian.FileSystemAdapter) {
-                const basePath = adapter.getBasePath();
-                const gitignorePath = path.join(basePath, ".gitignore");
-                if (fs.existsSync(gitignorePath)) {
-                    const content = fs.readFileSync(gitignorePath, "utf8");
-                    const lines = content.split(/\r?\n/);
-                    const rules = [];
-                    for (let line of lines) {
-                        line = line.trim();
-                        if (!line || line.startsWith("#")) continue;
-
-                        let pattern = line;
-                        let isDirOnly = pattern.endsWith("/");
-                        if (isDirOnly) pattern = pattern.slice(0, -1);
-                        if (pattern.startsWith("/")) pattern = pattern.slice(1);
-
-                        const regexStr = "^" + pattern
-                            .replace(/\./g, "\\.")
-                            .replace(/\*/g, ".*")
-                            .replace(/\?/g, ".") + (isDirOnly ? "(?:/.*)?$" : "(?:/.*)?$");
-
-                        rules.push({ regex: new RegExp(regexStr, "i"), pattern: pattern });
-                    }
-                    this.gitignoreCache = rules;
-                    return rules;
-                }
-            }
-        } catch (e) {
-            console.error("Error leyendo .gitignore:", e);
-        }
-        this.gitignoreCache = [];
-        return this.gitignoreCache;
+        // Async background trigger if cache is null
+        this.reloadGitignoreCache();
+        this.scheduleCacheCleanup();
+        return this.gitignoreCache || [];
     }
 
     // Helper: Fast in-memory check if path is ignored by .gitignore
@@ -1246,6 +1297,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
                         this.capturedLinksMap.delete(file.path);
                     }
                     resolve(false);
+                } finally {
+                    // Closure memory cleanup: release TFile references
+                    file = null;
                 }
             });
         });
@@ -1285,6 +1339,11 @@ class VaultGuardPlugin extends obsidian.Plugin {
             }
         }
 
+        // Bounded Map Capacity (Max 50 entries to prevent memory growth in long sessions)
+        if (this.capturedLinksMap.size >= 50) {
+            const firstKey = this.capturedLinksMap.keys().next().value;
+            if (firstKey) this.capturedLinksMap.delete(firstKey);
+        }
         this.capturedLinksMap.set(file.path, links);
     }
 
@@ -1360,10 +1419,14 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 deletedAt: new Date().toLocaleString(),
                 deletedBy: caller.callerDescription,
                 isFolder: isFolder,
-                links: capturedLinks,
                 inTrash: true,
                 restored: false
             };
+
+            // Memory Optimization: Only attach links array if non-empty
+            if (capturedLinks && capturedLinks.length > 0) {
+                logEntry.links = capturedLinks;
+            }
 
             // Add to top of history
             this.settings.deletedHistory.unshift(logEntry);
@@ -1391,6 +1454,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
     // Git Operations: Exec git command helper with configurable security timeout and process killing
     execGitCommand(args) {
         return new Promise((resolve, reject) => {
+            if (obsidian.Platform.isMobile || !child_process) {
+                return reject(new Error("La integración con Git requiere la versión de escritorio de Obsidian."));
+            }
             if (!this.isGitRepoValid) {
                 return reject(new Error("No se detectó un repositorio Git válido en la bóveda."));
             }
@@ -1405,13 +1471,21 @@ class VaultGuardPlugin extends obsidian.Plugin {
             let isTimedOut = false;
 
             const finalArgs = ["-c", "core.quotePath=false", ...args];
+            const isHeavySearch = args.includes("-p") || args.includes("--diff-filter=D") || args.includes("log");
+            const dynamicMaxBuffer = isHeavySearch ? 5 * 1024 * 1024 : 1 * 1024 * 1024;
 
             const childProc = child_process.execFile(
                 "git",
                 finalArgs,
-                { cwd: basePath, maxBuffer: 5 * 1024 * 1024 },
+                { cwd: basePath, maxBuffer: dynamicMaxBuffer },
                 (err, stdout, stderr) => {
                     if (timer) clearTimeout(timer);
+
+                    // Free native stdio stream buffers immediately to release Node heap memory
+                    try {
+                        if (childProc && childProc.stdout) childProc.stdout.destroy();
+                        if (childProc && childProc.stderr) childProc.stderr.destroy();
+                    } catch (streamErr) {}
 
                     if (isTimedOut) {
                         return reject(new Error(`La búsqueda en Git excedió el límite de tiempo (${timeoutSec}s) y fue cancelada por seguridad.`));
@@ -1428,6 +1502,8 @@ class VaultGuardPlugin extends obsidian.Plugin {
             const timer = setTimeout(() => {
                 isTimedOut = true;
                 try {
+                    if (childProc && childProc.stdout) childProc.stdout.destroy();
+                    if (childProc && childProc.stderr) childProc.stderr.destroy();
                     childProc.kill("SIGKILL");
                 } catch (killErr) {
                     console.error("Error cancelando proceso Git:", killErr);
@@ -1476,34 +1552,53 @@ class VaultGuardPlugin extends obsidian.Plugin {
         }
     }
 
-    // Helper: Fuzzy Search Matcher (Uses fuzzy regex + literal fallback)
+    // Diacritics/Accents Stripper (Normalizes "Canción" -> "cancion")
+    normalizeStringForSearch(str) {
+        if (!str) return "";
+        return str
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .toLowerCase()
+            .trim();
+    }
+
+    // Advanced Partial, Substring & Incomplete Matcher Engine
     matchesFuzzySearchTerm(targetString, searchTerm) {
         if (!searchTerm || !searchTerm.trim()) return true;
         if (!targetString) return false;
 
-        const target = targetString.toLowerCase();
-        const cleanTerm = searchTerm.toLowerCase().trim();
+        const normTarget = this.normalizeStringForSearch(targetString);
+        const normTerm = this.normalizeStringForSearch(searchTerm);
 
-        // 1. Try fuzzy regex match first (tolerant to suffixes and variations)
+        // 1. Direct Substring Check (Partial match: "test" matches "test.md", "testing.md", "my_test_file.md")
+        if (normTarget.includes(normTerm)) {
+            return true;
+        }
+
+        // 2. Tokenized Substring Match (Every word in query must match a substring of target)
+        const terms = normTerm.split(/[\s_\-\/\.\\]+/).filter(t => t.length > 0);
+        if (terms.length > 0 && terms.every(term => normTarget.includes(term))) {
+            return true;
+        }
+
+        // 3. Prefix/Suffix Incomplete Word Matcher (e.g. "vent" matches "Ventoy_v2.md")
         const fuzzyRegex = this.generateFuzzyRegex(searchTerm);
-        if (fuzzyRegex && fuzzyRegex.test(target)) {
+        if (fuzzyRegex && fuzzyRegex.test(normTarget)) {
             return true;
         }
 
-        // 2. Fallback: literal substring check (exact match)
-        if (target.includes(cleanTerm)) {
-            return true;
+        // 4. Character Infix Matcher for partial acronyms/shorthand (e.g. "vnt" matches "Ventoy.md")
+        if (terms.length === 1 && terms[0].length >= 2) {
+            const charPattern = terms[0].split("").map(c => c.replace(/[\\\[\](){}*+?|^$.]/g, "\\$&")).join(".*");
+            try {
+                const charRegex = new RegExp(charPattern, "i");
+                if (charRegex.test(normTarget)) {
+                    return true;
+                }
+            } catch (e) {}
         }
 
-        // 3. Fallback: all individual key terms present in any order
-        const noiseWords = new Set(["de", "del", "la", "el", "los", "las", "en", "un", "una", "y", "o", "a"]);
-        const terms = cleanTerm.split(/\s+/).filter(t => t.length > 0);
-        let keyTerms = terms;
-        if (terms.length > 1) {
-            const filtered = terms.filter(t => !noiseWords.has(t));
-            if (filtered.length > 0) keyTerms = filtered;
-        }
-        return keyTerms.every(term => target.includes(term));
+        return false;
     }
 
     // Mechanism 1: O(1) Fast resolution of a known candidate file path in Git
@@ -1640,23 +1735,40 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 args.push("-p");
             }
 
-            // Smart Date Inversion Normalization: If start > end (e.g. start=today, end=yesterday), swap them to ensure a valid range!
             let cleanStart = startDate ? startDate.trim() : "";
             let cleanEnd = endDate ? endDate.trim() : "";
 
+            // 5. Logical Error Check: If Start Date > End Date, flag as logical error and throw explicit Notice!
             if (cleanStart && cleanEnd && cleanStart > cleanEnd) {
-                const temp = cleanStart;
-                cleanStart = cleanEnd;
-                cleanEnd = temp;
+                const errorMsg = `Error de Rango: La fecha de inicio (${cleanStart}) no puede ser posterior a la fecha de fin (${cleanEnd}).`;
+                new obsidian.Notice(`[Vault Guard] ${errorMsg}`);
+                if (progressCallback) progressCallback(100, false);
+                throw new Error(errorMsg);
             }
 
-            // Native Date Boundaries: Handle the 4 date scenarios (--since & --until) as clean array arguments
-            if (cleanStart) {
-                const formattedSince = cleanStart.length <= 10 ? `${cleanStart} 00:00:00` : cleanStart;
+            // 1. Scenario 1: Neither date selected (cleanStart="" && cleanEnd="")
+            // Full history search from HEAD to the very first commit of the repository. (No --since or --until flags)
+
+            // 2. Scenario 2: ONLY Start Date selected (cleanStart !== "" && cleanEnd === "")
+            // Search SOLAMENTE desde esa fecha de inicio hasta el primer commit de todo el repositorio (commits <= cleanStart 23:59:59)
+            if (cleanStart && !cleanEnd) {
+                const formattedUntil = cleanStart.length <= 10 ? `${cleanStart} 23:59:59` : cleanStart;
+                args.push("--until", formattedUntil);
+            }
+
+            // 3. Scenario 3: ONLY End Date selected (cleanStart === "" && cleanEnd !== "")
+            // Search desde el HEAD hasta la fecha de fin (commits >= cleanEnd 00:00:00)
+            if (!cleanStart && cleanEnd) {
+                const formattedSince = cleanEnd.length <= 10 ? `${cleanEnd} 00:00:00` : cleanEnd;
                 args.push("--since", formattedSince);
             }
-            if (cleanEnd) {
+
+            // 4. Scenario 4: BOTH Start Date and End Date selected (cleanStart <= cleanEnd)
+            // Strict range between cleanStart 00:00:00 and cleanEnd 23:59:59
+            if (cleanStart && cleanEnd) {
+                const formattedSince = cleanStart.length <= 10 ? `${cleanStart} 00:00:00` : cleanStart;
                 const formattedUntil = cleanEnd.length <= 10 ? `${cleanEnd} 23:59:59` : cleanEnd;
+                args.push("--since", formattedSince);
                 args.push("--until", formattedUntil);
             }
 
@@ -1717,6 +1829,19 @@ class VaultGuardPlugin extends obsidian.Plugin {
                         }
 
                         if (isMatch) {
+                            // STRICT DELETED FILE CHECK: Verify file does NOT currently exist in the active vault/disk!
+                            const adapter = this.app.vault.adapter;
+                            const existsOnDisk = await adapter.exists(filePath);
+                            if (existsOnDisk || this.app.vault.getAbstractFileByPath(filePath)) {
+                                continue; // Skip active existing files! Only return truly deleted files.
+                            }
+
+                            // DUAL-LAYER DATE BOUNDARY REINFORCEMENT
+                            const commitDateStr = currentCommit.date.substring(0, 10);
+                            if (cleanStart && !cleanEnd && commitDateStr > cleanStart) continue;
+                            if (!cleanStart && cleanEnd && commitDateStr < cleanEnd) continue;
+                            if (cleanStart && cleanEnd && (commitDateStr < cleanStart || commitDateStr > cleanEnd)) continue;
+
                             seenKeys.add(key);
                             results.push({
                                 id: `historical:${currentCommit.hash}:${filePath}`,
@@ -1752,8 +1877,12 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     "--date=format:%Y-%m-%d %H:%M:%S"
                 ];
 
-                if (cleanStart) fallbackArgs.push("--since", cleanStart.length <= 10 ? `${cleanStart} 00:00:00` : cleanStart);
-                if (cleanEnd) fallbackArgs.push("--until", cleanEnd.length <= 10 ? `${cleanEnd} 23:59:59` : cleanEnd);
+                if (cleanStart && !cleanEnd) fallbackArgs.push("--until", cleanStart.length <= 10 ? `${cleanStart} 23:59:59` : cleanStart);
+                if (!cleanStart && cleanEnd) fallbackArgs.push("--since", cleanEnd.length <= 10 ? `${cleanEnd} 00:00:00` : cleanEnd);
+                if (cleanStart && cleanEnd) {
+                    fallbackArgs.push("--since", cleanStart.length <= 10 ? `${cleanStart} 00:00:00` : cleanStart);
+                    fallbackArgs.push("--until", cleanEnd.length <= 10 ? `${cleanEnd} 23:59:59` : cleanEnd);
+                }
 
                 const fallbackOutput = await this.execGitCommand(fallbackArgs);
                 const fbLines = (fallbackOutput || "").split("\n");
@@ -1778,6 +1907,19 @@ class VaultGuardPlugin extends obsidian.Plugin {
                                 if (ext !== "md" && !this.isProtectedExtension(ext)) continue;
 
                                 if (this.matchesFuzzySearchTerm(cleanPath, cleanTerm) || this.matchesFuzzySearchTerm(fileName, cleanTerm) || this.matchesFuzzySearchTerm(baseName, cleanTerm)) {
+                                    // STRICT DELETED FILE CHECK: Ensure file does NOT currently exist in active vault/disk
+                                    const adapter = this.app.vault.adapter;
+                                    const existsOnDisk = await adapter.exists(cleanPath);
+                                    if (existsOnDisk || this.app.vault.getAbstractFileByPath(cleanPath)) {
+                                        continue; // Skip active existing files!
+                                    }
+
+                                    // DUAL-LAYER DATE BOUNDARY REINFORCEMENT
+                                    const fbDateStr = fbCommit.date.substring(0, 10);
+                                    if (cleanStart && !cleanEnd && fbDateStr > cleanStart) continue;
+                                    if (!cleanStart && cleanEnd && fbDateStr < cleanEnd) continue;
+                                    if (cleanStart && cleanEnd && (fbDateStr < cleanStart || fbDateStr > cleanEnd)) continue;
+
                                     // Check if file is missing at HEAD (i.e. deleted)
                                     let existsAtHead = false;
                                     try {
@@ -1820,6 +1962,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
             });
 
             if (progressCallback) progressCallback(100, false);
+
+            // Free intermediate search keys memory
+            seenKeys.clear();
 
             return results;
         } catch (err) {
@@ -1889,6 +2034,35 @@ class VaultGuardPlugin extends obsidian.Plugin {
             } else {
                 await this.app.vault.create(item.filePath, content);
             }
+
+            // Log restoration event into Local History with 'Recuperado desde repositorio' badge
+            const gitLogEntry = {
+                id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 5),
+                path: item.filePath,
+                name: descriptor.name,
+                extension: descriptor.ext,
+                deletedAt: new Date().toLocaleString(),
+                deletedBy: "Restaurado desde Git",
+                isFolder: false,
+                inTrash: false,
+                restored: true,
+                restoredFromGit: true,
+                restoredGitCommit: item.commitHash ? item.commitHash.substring(0, 7) : "HEAD"
+            };
+
+            // Remove any previous entry for the same path to prevent duplicate cards
+            this.settings.deletedHistory = (this.settings.deletedHistory || []).filter(
+                h => (h.path || "").toLowerCase() !== item.filePath.toLowerCase()
+            );
+
+            // Insert at top of local history
+            this.settings.deletedHistory.unshift(gitLogEntry);
+
+            const limit = this.settings.maxHistoryEntries || 100;
+            if (this.settings.deletedHistory.length > limit) {
+                this.settings.deletedHistory = this.settings.deletedHistory.slice(0, limit);
+            }
+            await this.saveSettings();
 
             const sourceText = item.type === "uncommitted" ? "estado uncommitted (working tree protegido)" : `commit ${item.commitHash.substring(0, 7)}`;
             const label = `${descriptor.article} ${descriptor.noun} '${descriptor.name}' ${descriptor.verbRestored} exitosamente desde ${sourceText}.`;
@@ -2114,6 +2288,18 @@ class VaultGuardView extends obsidian.ItemView {
     onClose() {
         this.gitResults = [];
         this.hasSearchedGit = false;
+        this.isGitSearching = false;
+        this.searchErrorMessage = null;
+        this.localSearchTerm = "";
+        this.gitSearchTerm = "";
+
+        // Explicit DOM and Component Reference Teardown for Garbage Collection
+        if (this.progressBarFill) this.progressBarFill = null;
+        if (this.progressLabel) this.progressLabel = null;
+        if (this.logContainer) {
+            this.logContainer.empty();
+            this.logContainer = null;
+        }
         this.contentEl.empty();
     }
 
@@ -2121,6 +2307,11 @@ class VaultGuardView extends obsidian.ItemView {
         const container = this.contentEl;
         container.empty();
         container.addClass("vault-guard-container");
+
+        // Apply dynamic element density class (Grande, Mediano, Pequeño, Súper Pequeño)
+        const density = this.plugin.settings.elementDensity || "medium";
+        container.removeClass("vg-density-large", "vg-density-medium", "vg-density-small", "vg-density-supersmall");
+        container.addClass(`vg-density-${density}`);
 
         // 1. Header & All Status Badges
         const headerEl = container.createDiv({ cls: "vg-header" });
@@ -2218,6 +2409,19 @@ class VaultGuardView extends obsidian.ItemView {
                 this.gitSearchTerm = e.target.value;
             } else {
                 this.localSearchTerm = e.target.value;
+            }
+        });
+
+        // Keydown Enter listener: Pressing Enter triggers immediate search without losing focus
+        searchInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                if (this.activeTab === "git") {
+                    this.triggerGitSearch();
+                } else {
+                    this.activeLocalSearchQuery = (this.localSearchTerm || "").toLowerCase().trim();
+                    this.renderLogList(this.logContainer);
+                }
             }
         });
 
@@ -2384,6 +2588,7 @@ class VaultGuardView extends obsidian.ItemView {
         };
 
         try {
+            this.searchErrorMessage = null;
             this.gitResults = await this.plugin.searchDeletedFilesFromGit(
                 this.gitSearchTerm,
                 this.gitStartDate,
@@ -2393,8 +2598,13 @@ class VaultGuardView extends obsidian.ItemView {
             );
         } catch (err) {
             console.error("Error durante la búsqueda en Git:", err);
+            this.gitResults = [];
+            this.searchErrorMessage = err.message;
         } finally {
-            this.isGitSearching = false;
+            this.isGitSearching = false; // GUARANTEED Lock release!
+            if (this.progressBarFill) {
+                this.progressBarFill.removeClass("active");
+            }
         }
 
         // Synchronized Completion: Set progress bar to 100% completed
@@ -2420,6 +2630,15 @@ class VaultGuardView extends obsidian.ItemView {
         if (this.isGitSearching) {
             const loadingState = container.createDiv({ cls: "vg-empty-state" });
             loadingState.createEl("p", { text: "Escaneando commits del repositorio Git con filtros de archivos..." });
+            return;
+        }
+
+        // Display Date Range Error state if validation failed
+        if (this.searchErrorMessage) {
+            const errorState = container.createDiv({ cls: "vg-empty-state" });
+            const svgSpan = errorState.createSpan();
+            obsidian.setIcon(svgSpan, "alert-triangle");
+            errorState.createEl("p", { text: this.searchErrorMessage });
             return;
         }
 
@@ -2519,7 +2738,10 @@ class VaultGuardView extends obsidian.ItemView {
             let statusText = "En .trash";
             let statusCls = "vg-status-in-trash";
 
-            if (item.restored) {
+            if (item.restoredFromGit) {
+                statusText = "Recuperado desde repositorio";
+                statusCls = "vg-status-historical";
+            } else if (item.restored) {
                 statusText = "Restaurado";
                 statusCls = "vg-status-restored";
             } else if (item.isLostFile) {
@@ -2712,6 +2934,7 @@ class GitDatePickerModal extends obsidian.Modal {
 
     onClose() {
         this.onSelectDate = null;
+        this.app = null;
         this.contentEl.empty();
     }
 }
@@ -2888,6 +3111,8 @@ class PluginFolderDeleteModal extends obsidian.Modal {
 
     onClose() {
         this.callback = null;
+        this.file = null;
+        this.caller = null;
         this.contentEl.empty();
     }
 }
@@ -2948,6 +3173,8 @@ class PluginDeleteModal extends obsidian.Modal {
 
     onClose() {
         this.callback = null;
+        this.file = null;
+        this.caller = null;
         this.contentEl.empty();
     }
 }
@@ -3007,6 +3234,8 @@ class TotalGuardConfirmModal extends obsidian.Modal {
 
     onClose() {
         this.callback = null;
+        this.file = null;
+        this.caller = null;
         this.contentEl.empty();
     }
 }
@@ -3085,6 +3314,9 @@ class ConfirmDeleteModal extends obsidian.Modal {
 
     onClose() {
         this.callback = null;
+        this.file = null;
+        this.caller = null;
+        this.stats = null;
         this.contentEl.empty();
     }
 }
@@ -3130,6 +3362,7 @@ class ViewLinksModal extends obsidian.Modal {
     }
 
     onClose() {
+        this.entry = null;
         this.contentEl.empty();
     }
 }
@@ -3146,6 +3379,23 @@ class VaultGuardSettingTab extends obsidian.PluginSettingTab {
         containerEl.empty();
 
         containerEl.createEl("h2", { text: "Configuración de Vault Guard" });
+
+        // Setting 0: UI Element Density / Sizing (Grande, Mediano, Pequeño, Súper Pequeño)
+        new obsidian.Setting(containerEl)
+            .setName("Tamaño de elementos de la interfaz (Densidad)")
+            .setDesc("Ajusta la escala y tamaño visual del panel lateral, tarjetas de log, botones e insignias (Por defecto: Mediano).")
+            .addDropdown(dropdown => dropdown
+                .addOption("large", "Grande (Tamaño original)")
+                .addOption("medium", "Mediano (Recomendado - 15% más compacto)")
+                .addOption("small", "Pequeño (Compacto)")
+                .addOption("supersmall", "Súper Pequeño (Ultra compacto)")
+                .setValue(this.plugin.settings.elementDensity || "medium")
+                .onChange(async value => {
+                    this.plugin.settings.elementDensity = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.refreshView();
+                })
+            );
 
         // Setting 1: Total Guard
         new obsidian.Setting(containerEl)
