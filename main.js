@@ -1716,13 +1716,14 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 }
             }
 
-            // STEP 2: Discover Historical Deletions in Git History (Mechanism 2)
+            // STEP 2: Discover Historical Deletions across ENTIRE Git Repository History (down to root initial commit)
             if (progressCallback) progressCallback(45, true);
 
-            // Native Git filtering flags: --diff-filter=D, -M (renames), --name-status
+            // Native Git filtering flags: --all (all refs), --reflog (all reflog commits), --full-history (down to root commit)
             const args = [
                 "log",
                 "--all",
+                "--reflog",
                 "--full-history",
                 "--diff-filter=D",
                 "-M",
@@ -1775,6 +1776,17 @@ class VaultGuardPlugin extends obsidian.Plugin {
             const output = await this.execGitCommand(args);
             if (progressCallback) progressCallback(75, true);
 
+            // Fast O(1) In-Memory Active Vault File Lookup Pipeline (Avoids slow disk I/O in search loops)
+            const activeVaultFiles = this.app.vault.getFiles();
+            const activeVaultPathsSet = new Set();
+            for (let k = 0; k < activeVaultFiles.length; k++) {
+                activeVaultPathsSet.add(activeVaultFiles[k].path.toLowerCase());
+            }
+
+            // Pre-compiled Search Matchers for maximum algorithm throughput
+            const compiledRegex = cleanTerm ? this.generateFuzzyRegex(cleanTerm) : null;
+            const cleanTermLower = cleanTerm ? cleanTerm.toLowerCase() : "";
+
             const lines = (output || "").split("\n");
             let currentCommit = null;
             let currentCommitDiff = "";
@@ -1814,26 +1826,25 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
                         let isMatch = true;
                         if (cleanTerm) {
+                            const filePathLower = filePath.toLowerCase();
+                            const fileNameLower = fileName.toLowerCase();
+                            const baseNameLower = baseName.toLowerCase();
+                            
                             isMatch = 
-                                this.matchesFuzzySearchTerm(filePath, cleanTerm) ||
-                                this.matchesFuzzySearchTerm(fileName, cleanTerm) ||
-                                this.matchesFuzzySearchTerm(baseName, cleanTerm) ||
-                                this.matchesFuzzySearchTerm(ext, cleanTerm) ||
-                                this.matchesFuzzySearchTerm(currentCommit.subject, cleanTerm) ||
-                                this.matchesFuzzySearchTerm(currentCommit.body, cleanTerm) ||
-                                this.matchesFuzzySearchTerm(currentCommit.author, cleanTerm);
+                                filePathLower.includes(cleanTermLower) ||
+                                fileNameLower.includes(cleanTermLower) ||
+                                baseNameLower.includes(cleanTermLower) ||
+                                (compiledRegex && (compiledRegex.test(filePath) || compiledRegex.test(currentCommit.subject) || compiledRegex.test(currentCommit.body)));
 
                             if (!isMatch && searchInDiff && currentCommitDiff) {
-                                isMatch = this.matchesFuzzySearchTerm(currentCommitDiff, cleanTerm);
+                                isMatch = compiledRegex ? compiledRegex.test(currentCommitDiff) : currentCommitDiff.toLowerCase().includes(cleanTermLower);
                             }
                         }
 
                         if (isMatch) {
-                            // STRICT DELETED FILE CHECK: Verify file does NOT currently exist in the active vault/disk!
-                            const adapter = this.app.vault.adapter;
-                            const existsOnDisk = await adapter.exists(filePath);
-                            if (existsOnDisk || this.app.vault.getAbstractFileByPath(filePath)) {
-                                continue; // Skip active existing files! Only return truly deleted files.
+                            // FAST O(1) STRICT DELETED FILE CHECK: Skip active existing files in vault!
+                            if (activeVaultPathsSet.has(filePath.toLowerCase())) {
+                                continue;
                             }
 
                             // DUAL-LAYER DATE BOUNDARY REINFORCEMENT
@@ -1865,11 +1876,12 @@ class VaultGuardPlugin extends obsidian.Plugin {
             }
 
             // FALLBACK CAUSE FIX: If historical diff-filter=D returned 0 results and user specified a searchTerm,
-            // run a secondary fallback search across all commits (A/M/R) and check which files no longer exist at HEAD!
+            // run a secondary fallback search across all commits down to root commit (A/M/R)
             if (results.length === 0 && cleanTerm) {
                 const fallbackArgs = [
                     "log",
                     "--all",
+                    "--reflog",
                     "--full-history",
                     "-M",
                     "--name-status",
@@ -1906,12 +1918,20 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
                                 if (ext !== "md" && !this.isProtectedExtension(ext)) continue;
 
-                                if (this.matchesFuzzySearchTerm(cleanPath, cleanTerm) || this.matchesFuzzySearchTerm(fileName, cleanTerm) || this.matchesFuzzySearchTerm(baseName, cleanTerm)) {
-                                    // STRICT DELETED FILE CHECK: Ensure file does NOT currently exist in active vault/disk
-                                    const adapter = this.app.vault.adapter;
-                                    const existsOnDisk = await adapter.exists(cleanPath);
-                                    if (existsOnDisk || this.app.vault.getAbstractFileByPath(cleanPath)) {
-                                        continue; // Skip active existing files!
+                                const cleanPathLower = cleanPath.toLowerCase();
+                                const fileNameLower = fileName.toLowerCase();
+                                const baseNameLower = baseName.toLowerCase();
+
+                                const isFbMatch = 
+                                    cleanPathLower.includes(cleanTermLower) ||
+                                    fileNameLower.includes(cleanTermLower) ||
+                                    baseNameLower.includes(cleanTermLower) ||
+                                    (compiledRegex && compiledRegex.test(cleanPath));
+
+                                if (isFbMatch) {
+                                    // FAST O(1) STRICT DELETED FILE CHECK: Ensure file does NOT currently exist in active vault
+                                    if (activeVaultPathsSet.has(cleanPathLower)) {
+                                        continue;
                                     }
 
                                     // DUAL-LAYER DATE BOUNDARY REINFORCEMENT
