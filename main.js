@@ -180,10 +180,16 @@ class VaultGuardPlugin extends obsidian.Plugin {
         this.lastUserInteractionTimestamp = 0;
         this.lastUserInteractionType = null;
         this.lastInteractedFilePath = null;
+        this.lastContextMenuTimestamp = 0;
+        this.lastContextMenuFilePath = null;
 
         this.boundUserActivityListener = (evt) => {
             this.lastUserInteractionTimestamp = Date.now();
             this.lastUserInteractionType = evt ? evt.type : "user_event";
+
+            if (evt && (evt.type === "contextmenu" || (evt.target && evt.target.closest && evt.target.closest(".menu, .menu-item")))) {
+                this.lastContextMenuTimestamp = Date.now();
+            }
         };
 
         this.userActivityEvents = [
@@ -200,16 +206,24 @@ class VaultGuardPlugin extends obsidian.Plugin {
         this.registerEvent(
             this.app.workspace.on("file-menu", (menu, file) => {
                 this.lastUserInteractionTimestamp = Date.now();
+                this.lastContextMenuTimestamp = Date.now();
                 this.lastUserInteractionType = "file_menu_context";
-                if (file) this.lastInteractedFilePath = file.path;
+                if (file) {
+                    this.lastInteractedFilePath = file.path;
+                    this.lastContextMenuFilePath = file.path;
+                }
             })
         );
 
         this.registerEvent(
             this.app.workspace.on("editor-menu", (menu, editor, view) => {
                 this.lastUserInteractionTimestamp = Date.now();
+                this.lastContextMenuTimestamp = Date.now();
                 this.lastUserInteractionType = "editor_menu_context";
-                if (view && view.file) this.lastInteractedFilePath = view.file.path;
+                if (view && view.file) {
+                    this.lastInteractedFilePath = view.file.path;
+                    this.lastContextMenuFilePath = view.file.path;
+                }
             })
         );
 
@@ -1044,8 +1058,8 @@ class VaultGuardPlugin extends obsidian.Plugin {
         return { mdCount, otherCount, subfolderCount };
     }
 
-    // Multi-Flag High-Precision Caller Detection (100% Guaranteed Distinction between User UI vs Background Plugin)
-    detectCallerInfo() {
+    // Multi-Flag High-Precision Caller Detection (STRICT SECURITY LOCKS FOR CONTEXT MENU ONLY AS USER)
+    detectCallerInfo(targetFile) {
         const err = new Error();
         const stack = err.stack || "";
         const lines = stack.split("\n");
@@ -1057,7 +1071,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
         const stackStr = stack.toLowerCase();
 
-        // 1. SCAN CALL STACK FOR THIRD-PARTY PLUGINS:
+        // CANDADO 1: SCAN CALL STACK FOR THIRD-PARTY PLUGINS (No exceptions!)
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
 
@@ -1066,7 +1080,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 continue;
             }
 
-            // Pattern for third-party plugins: .../plugins/<pluginId>/...
+            // Pattern for third-party plugins: .../plugins/<pluginId>/... or .../obsidian-plugins/<pluginId>/...
             const pluginMatch = line.match(/(?:plugins|obsidian-plugins)[\\/]([^\\/:?#]+)[\\/](.+)$/i) ||
                                 line.match(/plugins\/([^/?:#]+)\/(.+)/i);
 
@@ -1075,7 +1089,6 @@ class VaultGuardPlugin extends obsidian.Plugin {
                 pluginId = pluginMatch[1];
                 location = pluginMatch[2] ? pluginMatch[2].trim().replace(/\)$/, "") : "--";
 
-                // Extract function name, class method, or async process name
                 const fnMatch = line.match(/at\s+(?:async\s+)?([^\s(]+)/) || line.match(/([a-zA-Z0-9_$]+)\s*\(/);
                 if (fnMatch && fnMatch[1]) {
                     functionName = fnMatch[1];
@@ -1084,7 +1097,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
             }
         }
 
-        // IF A THIRD-PARTY PLUGIN IS PRESENT IN CALL STACK -> IDENTIFY EXACT PLUGIN ID AND PROCESS!
+        // LOCK: If a third-party plugin is in call stack -> IT IS 100% THAT PLUGIN! NO PLUGIN IS COUNTED AS USER!
         if (isThirdPartyPlugin && pluginId) {
             const processText = (functionName && functionName !== "--") ? functionName : "ejecución directa";
             const fnText = (functionName && functionName !== "--") ? `proceso: '${functionName}'` : "ejecución directa";
@@ -1101,67 +1114,62 @@ class VaultGuardPlugin extends obsidian.Plugin {
             };
         }
 
-        // 2. CHECK MULTIPLE HIGH-PRECISION USER ACTIVITY FLAGS:
+        // CANDADO 2 & 3: STRICT CONTEXT MENU DETECTOR FOR "USUARIO"
+        // User MUST HAVE executed a right-click context menu delete action in Obsidian!
         const now = Date.now();
-        const timeSinceLastInteraction = now - (this.lastUserInteractionTimestamp || 0);
-        const hasRecentUserInteraction = timeSinceLastInteraction < 7000; // User clicked or pressed key within last 7 seconds!
+        const timeSinceContextMenu = now - (this.lastContextMenuTimestamp || 0);
+        const hasRecentContextMenu = timeSinceContextMenu < 4000; // Triggered within 4 seconds
 
-        const hasWindowUiEvent = window && window.event && (
-            window.event instanceof UIEvent ||
-            window.event instanceof MouseEvent ||
-            window.event instanceof KeyboardEvent ||
-            window.event instanceof PointerEvent
-        );
-
-        // Check if DOM focus is inside Obsidian File Explorer UI element
-        let isFocusedInExplorer = false;
-        if (document.activeElement) {
-            const activeClass = document.activeElement.className || "";
-            const activeClosest = document.activeElement.closest ? document.activeElement.closest(".nav-files-container, .file-explorer, .workspace-leaf") : null;
-            if (activeClass.includes("nav") || activeClass.includes("tree") || activeClosest) {
-                isFocusedInExplorer = true;
+        const targetPath = targetFile ? (typeof targetFile === "string" ? targetFile : targetFile.path) : null;
+        let isPathMatchingContext = false;
+        if (targetPath && (this.lastContextMenuFilePath || this.lastInteractedFilePath)) {
+            const lastPath = this.lastContextMenuFilePath || this.lastInteractedFilePath;
+            if (targetPath === lastPath || targetPath.startsWith(lastPath + "/") || lastPath.startsWith(targetPath + "/")) {
+                isPathMatchingContext = true;
             }
         }
 
-        const hasUserStackKeywords = 
-            stackStr.includes("mouseevent") || 
-            stackStr.includes("keyboardevent") || 
-            stackStr.includes("pointerevent") || 
-            stackStr.includes("menuitem") || 
-            stackStr.includes("onclick") || 
-            stackStr.includes("contextmenu") || 
-            stackStr.includes("file-explorer") || 
-            stackStr.includes("filetree") || 
-            stackStr.includes("treeitem") || 
-            stackStr.includes("promptdelete") || 
-            stackStr.includes("trashfile") || 
-            stackStr.includes("app:delete-file");
+        let isMenuDomActive = false;
+        if (document.querySelector(".menu, .menu-item, .active-menu-item, .clickable-icon")) {
+            isMenuDomActive = true;
+        }
 
-        // IF NO THIRD-PARTY PLUGIN WAS FOUND, AND ANY USER FLAG IS TRUE OR RECENT USER INTERACTION OCCURRED -> IT IS THE USER!
-        const isUserAction = hasRecentUserInteraction || hasWindowUiEvent || isFocusedInExplorer || hasUserStackKeywords || (this.app.workspace && this.app.workspace.layoutReady && document.hasFocus());
+        const hasContextMenuStack = 
+            stackStr.includes("file-menu") || 
+            stackStr.includes("editor-menu") || 
+            stackStr.includes("showatmouse") || 
+            stackStr.includes("contextmenu") ||
+            stackStr.includes("onfilemenu") ||
+            stackStr.includes("menuitem") ||
+            stackStr.includes("app:delete-file") ||
+            stackStr.includes("promptdelete");
 
-        if (isUserAction) {
+        // STRICT CONDITIONAL LOCK: User is ONLY returned if a live Context Menu action occurred!
+        const isStrictContextMenuUser = hasRecentContextMenu && (isMenuDomActive || hasContextMenuStack || isPathMatchingContext);
+
+        if (isStrictContextMenuUser) {
             return {
                 isPlugin: false,
                 pluginId: "unknown",
-                functionName: "Acción UI",
-                location: isFocusedInExplorer ? "Explorador de archivos (File Explorer)" : "Menú contextual / Atajo de teclado",
-                confidenceScore: 98,
+                functionName: "Menú Contextual",
+                location: "Menú contextual de Obsidian (Clic derecho -> Eliminar)",
+                confidenceScore: 100,
                 badgeText: `Usuario`,
-                detailText: `Usuario (Acción manual desde la UI de Obsidian / Menú contextual)`,
-                callerDescription: `Usuario`
+                detailText: `Usuario (Acción manual desde el menú contextual de clic derecho)`,
+                callerDescription: `Usuario (Menú contextual)`
             };
         }
 
-        // ONLY IF Obsidian layout is NOT ready or NO user interaction occurred for over 7s AND document is NOT focused:
+        // CANDADO 4: DEFAULT FALLBACK SECURITY LOCK
+        // If NO context menu was triggered, IT IS NOT THE USER! It is a background script/plugin!
         return {
             isPlugin: true,
             pluginId: "Proceso de Inicio / Segundo plano",
-            functionName: "Inicialización de Obsidian",
-            location: "Sistema de archivos de Obsidian",
+            functionName: "Proceso de segundo plano / API interna",
+            location: "Sistema de archivos de Obsidian / Plugin en segundo plano",
             confidenceScore: 90,
-            badgeText: `Proceso de Inicio`,
-            detailText: `Proceso automático / Inicialización de Obsidian (Sin interacción del usuario)`,
+            badgeText: `Proceso de Segundo Plano`,
+            detailText: `Proceso automático / Plugin en segundo plano (Sin menú contextual del usuario)`,
             callerDescription: `Proceso de Inicio / Segundo plano`
         };
     }
@@ -1247,7 +1255,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
         const nextPromise = safeQueue.then(() => {
             return new Promise(async (resolve) => {
                 try {
-                    const caller = this.detectCallerInfo();
+                    const caller = this.detectCallerInfo(file);
 
                     // Capture links before deleting
                     this.captureLinksForFile(file);
@@ -1404,7 +1412,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
             // Protection and history logging strictly applies ONLY to folders or files with protected extensions!
             if (!isFolder && !this.isProtectedExtension(descriptor.ext)) return;
 
-            const caller = this.detectCallerInfo();
+            const caller = this.detectCallerInfo(file);
             const fileName = descriptor.name;
             const capturedLinks = (file && file.path) ? (this.capturedLinksMap.get(file.path) || []) : [];
             if (file && file.path) {
