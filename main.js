@@ -65,6 +65,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
         // Map to store captured links right before deletion
         this.capturedLinksMap = new Map();
 
+        // Preserve the approved attribution until Obsidian emits the delete event.
+        this.deletionAttributions = new Map();
+
         // In-memory cache for .gitignore rules to avoid synchronous file reads during execution
         this.gitignoreCache = null;
 
@@ -130,6 +133,9 @@ class VaultGuardPlugin extends obsidian.Plugin {
         if (this.capturedLinksMap) {
             this.capturedLinksMap.clear();
         }
+        if (this.deletionAttributions) {
+            this.deletionAttributions.clear();
+        }
         if (this.snapshotTimer) {
             clearTimeout(this.snapshotTimer);
         }
@@ -175,57 +181,108 @@ class VaultGuardPlugin extends obsidian.Plugin {
         this.refreshActiveViews();
     }
 
-    // Extended Multi-Flag User Activity & UI Context Listener
+    // Strict, one-shot user intent tracker for file/folder context-menu deletion.
+    isDeleteMenuItemElement(menuItem) {
+        if (!menuItem || !menuItem.querySelector) return false;
+        const icon = menuItem.querySelector(
+            ".lucide-trash, .lucide-trash-2, [data-icon='trash'], [data-icon='trash-2'], [data-lucide='trash'], [data-lucide='trash-2']"
+        );
+        const rawLabel = menuItem.getAttribute("aria-label") || menuItem.getAttribute("title") || menuItem.textContent || "";
+        const label = rawLabel.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+        return Boolean(icon || /(^|\s)(delete|trash|eliminar|borrar|papelera)(\s|$)/i.test(label));
+    }
+
+    clearUserDeleteIntent() {
+        this.contextMenuCandidate = null;
+        this.pendingUserDeleteIntent = null;
+    }
+
     registerUserActivityTrackers() {
         this.lastUserInteractionTimestamp = 0;
         this.lastUserInteractionType = null;
         this.lastInteractedFilePath = null;
         this.lastContextMenuTimestamp = 0;
         this.lastContextMenuFilePath = null;
+        this.lastTrustedRightClickTimestamp = 0;
+        this.contextMenuCandidate = null;
+        this.pendingUserDeleteIntent = null;
 
         this.boundUserActivityListener = (evt) => {
+            if (!evt) return;
             this.lastUserInteractionTimestamp = Date.now();
-            this.lastUserInteractionType = evt ? evt.type : "user_event";
+            this.lastUserInteractionType = evt.type || "user_event";
 
-            if (evt && (evt.type === "contextmenu" || (evt.target && evt.target.closest && evt.target.closest(".menu, .menu-item")))) {
+            if ((evt.type === "pointerdown" || evt.type === "mousedown") && evt.isTrusted === true && evt.button === 2) {
+                this.clearUserDeleteIntent();
+                this.lastTrustedRightClickTimestamp = Date.now();
+                this.lastContextMenuTimestamp = this.lastTrustedRightClickTimestamp;
+                return;
+            }
+
+            if (evt.type === "keydown" || evt.type === "keyup") {
+                this.clearUserDeleteIntent();
+                return;
+            }
+
+            if (evt.type === "contextmenu") {
+                this.clearUserDeleteIntent();
+                if (evt.isTrusted === true && (evt.button === 2 || evt.button === undefined)) {
+                    this.lastTrustedRightClickTimestamp = Date.now();
+                    this.lastContextMenuTimestamp = this.lastTrustedRightClickTimestamp;
+                } else {
+                    this.lastTrustedRightClickTimestamp = 0;
+                }
+                return;
+            }
+
+            if (evt.type !== "pointerdown" && evt.type !== "mousedown" && evt.type !== "click") return;
+            const menuItem = evt.target && evt.target.closest ? evt.target.closest(".menu-item") : null;
+            if (!menuItem) {
+                if (evt.type === "click") this.clearUserDeleteIntent();
+                return;
+            }
+
+            const candidate = this.contextMenuCandidate;
+            const candidateAge = candidate ? Date.now() - candidate.openedAt : Number.POSITIVE_INFINITY;
+            if (evt.isTrusted === true && candidate && candidateAge >= 0 && candidateAge <= 2500 && this.isDeleteMenuItemElement(menuItem)) {
+                this.pendingUserDeleteIntent = {
+                    filePath: candidate.filePath,
+                    clickedAt: Date.now(),
+                    consumed: false
+                };
                 this.lastContextMenuTimestamp = Date.now();
+                this.contextMenuCandidate = null;
             }
         };
 
         this.userActivityEvents = [
-            "mousedown", "mouseup", "click", "contextmenu", 
-            "keydown", "keyup", "pointerdown", "pointerup", 
+            "mousedown", "mouseup", "click", "contextmenu",
+            "keydown", "keyup", "pointerdown", "pointerup",
             "touchend", "dragstart", "drop"
         ];
-
         this.userActivityEvents.forEach(evtName => {
             window.addEventListener(evtName, this.boundUserActivityListener, { capture: true, passive: true });
         });
 
-        // Register Obsidian Workspace UI Event Hooks
         this.registerEvent(
             this.app.workspace.on("file-menu", (menu, file) => {
-                this.lastUserInteractionTimestamp = Date.now();
-                this.lastContextMenuTimestamp = Date.now();
+                const now = Date.now();
+                const cameFromTrustedRightClick = now - this.lastTrustedRightClickTimestamp <= 750;
+                this.lastUserInteractionTimestamp = now;
                 this.lastUserInteractionType = "file_menu_context";
-                if (file) {
+                if (file && file.path && cameFromTrustedRightClick) {
                     this.lastInteractedFilePath = file.path;
                     this.lastContextMenuFilePath = file.path;
+                    this.contextMenuCandidate = { filePath: file.path, openedAt: now };
+                    this.pendingUserDeleteIntent = null;
+                } else {
+                    this.clearUserDeleteIntent();
                 }
             })
         );
 
-        this.registerEvent(
-            this.app.workspace.on("editor-menu", (menu, editor, view) => {
-                this.lastUserInteractionTimestamp = Date.now();
-                this.lastContextMenuTimestamp = Date.now();
-                this.lastUserInteractionType = "editor_menu_context";
-                if (view && view.file) {
-                    this.lastInteractedFilePath = view.file.path;
-                    this.lastContextMenuFilePath = view.file.path;
-                }
-            })
-        );
+        // Editor menus are deliberately insufficient: only file/folder context menus qualify.
+        this.registerEvent(this.app.workspace.on("editor-menu", () => this.clearUserDeleteIntent()));
 
         this.registerEvent(
             this.app.workspace.on("active-leaf-change", () => {
@@ -1058,119 +1115,119 @@ class VaultGuardPlugin extends obsidian.Plugin {
         return { mdCount, otherCount, subfolderCount };
     }
 
-    // Multi-Flag High-Precision Caller Detection (STRICT SECURITY LOCKS FOR CONTEXT MENU ONLY AS USER)
-    detectCallerInfo(targetFile) {
-        const err = new Error();
-        const stack = err.stack || "";
+    // Identify plugin and process independently; user attribution requires a consumed UI intent.
+    detectCallerInfo(targetFile, evidence) {
+        const capturedStack = evidence && typeof evidence === "object" ? evidence.stack : evidence;
+        const entryPoint = evidence && typeof evidence === "object" ? evidence.entryPoint : "unknown";
+        const stack = capturedStack || (new Error().stack || "");
         const lines = stack.split("\n");
+        const ownPluginId = (this.manifest && this.manifest.id) || "vault-guard";
+        let pluginId = "unknown";
+        let functionName = "unknown";
+        let location = "unknown";
 
-        let isThirdPartyPlugin = false;
-        let pluginId = null;
-        let functionName = null;
-        let location = null;
+        const pluginPatterns = [
+            /(?:^|[\\/])\.obsidian[\\/]plugins[\\/]([^\\/:?#)]+)[\\/]([^\n)]+)/i,
+            /(?:^|[\\/])plugins[\\/]([^\\/:?#)]+)[\\/]([^\n)]+)/i,
+            /\bplugin:([^:\s/)]+):([^\s)]+)/i
+        ];
 
-        const stackStr = stack.toLowerCase();
+        for (const line of lines) {
+            if (line.includes(ownPluginId) || /interceptDeletion|detectCallerInfo|captureDeletionEvidence/.test(line)) continue;
 
-        // CANDADO 1: SCAN CALL STACK FOR THIRD-PARTY PLUGINS (No exceptions!)
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-
-            // Ignore internal Vault Guard frames
-            if (line.includes("vault-guard") || line.includes("interceptDeletion") || line.includes("detectCallerInfo")) {
-                continue;
+            const fnMatch = line.match(/\bat\s+(?:async\s+)?([^\s(]+)/i);
+            if (functionName === "unknown" && fnMatch && fnMatch[1] && !/^(new\s+)?Error$/.test(fnMatch[1])) {
+                functionName = fnMatch[1];
             }
 
-            // Pattern for third-party plugins: .../plugins/<pluginId>/... or .../obsidian-plugins/<pluginId>/...
-            const pluginMatch = line.match(/(?:plugins|obsidian-plugins)[\\/]([^\\/:?#]+)[\\/](.+)$/i) ||
-                                line.match(/plugins\/([^/?:#]+)\/(.+)/i);
-
-            if (pluginMatch && pluginMatch[1] && pluginMatch[1] !== "vault-guard") {
-                isThirdPartyPlugin = true;
-                pluginId = pluginMatch[1];
-                location = pluginMatch[2] ? pluginMatch[2].trim().replace(/\)$/, "") : "--";
-
-                const fnMatch = line.match(/at\s+(?:async\s+)?([^\s(]+)/) || line.match(/([a-zA-Z0-9_$]+)\s*\(/);
-                if (fnMatch && fnMatch[1]) {
-                    functionName = fnMatch[1];
-                }
+            for (const pattern of pluginPatterns) {
+                const match = line.match(pattern);
+                if (!match || !match[1] || match[1] === ownPluginId) continue;
+                pluginId = match[1];
+                location = (match[2] || "unknown").trim().replace(/\)$/, "");
+                if (fnMatch && fnMatch[1]) functionName = fnMatch[1];
                 break;
             }
+            if (pluginId !== "unknown") break;
         }
 
-        // LOCK: If a third-party plugin is in call stack -> IT IS 100% THAT PLUGIN! NO PLUGIN IS COUNTED AS USER!
-        if (isThirdPartyPlugin && pluginId) {
-            const processText = (functionName && functionName !== "--") ? functionName : "ejecución directa";
-            const fnText = (functionName && functionName !== "--") ? `proceso: '${functionName}'` : "ejecución directa";
-            const locText = (location && location !== "--") ? ` (${location})` : "";
+        if (pluginId !== "unknown") {
+            const manifest = this.app.plugins && this.app.plugins.manifests ? this.app.plugins.manifests[pluginId] : null;
+            const pluginName = manifest && manifest.name ? manifest.name : pluginId;
             return {
+                requesterType: "plugin",
                 isPlugin: true,
-                pluginId: pluginId,
-                functionName: functionName || "--",
-                location: location || "--",
+                pluginId,
+                pluginName,
+                functionName,
+                location,
                 confidenceScore: 100,
-                badgeText: `Plugin: ${pluginId}`,
-                detailText: `Plugin '${pluginId}' [${fnText}${locText}]`,
-                callerDescription: `Plugin: ${pluginId} (proceso: ${processText})`
+                badgeText: "Plugin: " + pluginName,
+                detailText: "Plugin: " + pluginName + " (" + pluginId + ") | Proceso: " + functionName,
+                callerDescription: "Plugin: " + pluginName + " (" + pluginId + ") | Proceso: " + functionName
             };
         }
 
-        // CANDADO 2 & 3: STRICT CONTEXT MENU DETECTOR FOR "USUARIO"
-        // User MUST HAVE executed a right-click context menu delete action in Obsidian!
-        const now = Date.now();
-        const timeSinceContextMenu = now - (this.lastContextMenuTimestamp || 0);
-        const hasRecentContextMenu = timeSinceContextMenu < 4000; // Triggered within 4 seconds
+        const targetPath = targetFile ? (typeof targetFile === "string" ? targetFile : targetFile.path) : "";
+        const pathsMatch = (contextPath) => Boolean(targetPath && contextPath && (
+            targetPath === contextPath ||
+            targetPath.startsWith(contextPath + "/") ||
+            contextPath.startsWith(targetPath + "/")
+        ));
 
-        const targetPath = targetFile ? (typeof targetFile === "string" ? targetFile : targetFile.path) : null;
-        let isPathMatchingContext = false;
-        if (targetPath && (this.lastContextMenuFilePath || this.lastInteractedFilePath)) {
-            const lastPath = this.lastContextMenuFilePath || this.lastInteractedFilePath;
-            if (targetPath === lastPath || targetPath.startsWith(lastPath + "/") || lastPath.startsWith(targetPath + "/")) {
-                isPathMatchingContext = true;
-            }
-        }
+        const intent = this.pendingUserDeleteIntent;
+        const intentAge = intent ? Date.now() - intent.clickedAt : Number.POSITIVE_INFINITY;
+        const hasExplicitMenuClick = Boolean(
+            intent &&
+            !intent.consumed &&
+            intentAge >= 0 &&
+            intentAge <= 1500 &&
+            pathsMatch(intent.filePath)
+        );
 
-        let isMenuDomActive = false;
-        if (document.querySelector(".menu, .menu-item, .active-menu-item, .clickable-icon")) {
-            isMenuDomActive = true;
-        }
+        // Obsidian may rebuild/remove the menu item before its DOM click can be inspected.
+        // FileManager is a stable semantic fallback, but only after a trusted file-menu right-click.
+        const candidate = this.contextMenuCandidate;
+        const candidateAge = candidate ? Date.now() - candidate.openedAt : Number.POSITIVE_INFINITY;
+        const isNativeDeleteEntry = entryPoint === "fileManager.promptDelete" || entryPoint === "fileManager.trashFile";
+        const hasNativeContextDelete = Boolean(
+            candidate &&
+            candidateAge >= 0 &&
+            candidateAge <= 1500 &&
+            pathsMatch(candidate.filePath) &&
+            isNativeDeleteEntry
+        );
 
-        const hasContextMenuStack = 
-            stackStr.includes("file-menu") || 
-            stackStr.includes("editor-menu") || 
-            stackStr.includes("showatmouse") || 
-            stackStr.includes("contextmenu") ||
-            stackStr.includes("onfilemenu") ||
-            stackStr.includes("menuitem") ||
-            stackStr.includes("app:delete-file") ||
-            stackStr.includes("promptdelete");
+        const isExplicitUserDelete = hasExplicitMenuClick || hasNativeContextDelete;
 
-        // STRICT CONDITIONAL LOCK: User is ONLY returned if a live Context Menu action occurred!
-        const isStrictContextMenuUser = hasRecentContextMenu && (isMenuDomActive || hasContextMenuStack || isPathMatchingContext);
-
-        if (isStrictContextMenuUser) {
+        if (isExplicitUserDelete) {
+            if (intent) intent.consumed = true;
+            this.clearUserDeleteIntent();
             return {
+                requesterType: "user",
                 isPlugin: false,
                 pluginId: "unknown",
-                functionName: "Menú Contextual",
-                location: "Menú contextual de Obsidian (Clic derecho -> Eliminar)",
+                pluginName: "unknown",
+                functionName: "Menú contextual: Eliminar",
+                location: "Menú contextual de archivo/carpeta",
                 confidenceScore: 100,
-                badgeText: `Usuario`,
-                detailText: `Usuario (Acción manual desde el menú contextual de clic derecho)`,
-                callerDescription: `Usuario (Menú contextual)`
+                badgeText: "Usuario",
+                detailText: "Usuario | Proceso: Menú contextual: Eliminar",
+                callerDescription: "Usuario | Proceso: Menú contextual: Eliminar"
             };
         }
 
-        // CANDADO 4: DEFAULT FALLBACK SECURITY LOCK
-        // If NO context menu was triggered, IT IS NOT THE USER! It is a background script/plugin!
         return {
+            requesterType: "unknown",
             isPlugin: true,
-            pluginId: "Proceso de Inicio / Segundo plano",
-            functionName: "Proceso de segundo plano / API interna",
-            location: "Sistema de archivos de Obsidian / Plugin en segundo plano",
-            confidenceScore: 90,
-            badgeText: `Proceso de Segundo Plano`,
-            detailText: `Proceso automático / Plugin en segundo plano (Sin menú contextual del usuario)`,
-            callerDescription: `Proceso de Inicio / Segundo plano`
+            pluginId: "unknown",
+            pluginName: "unknown",
+            functionName,
+            location,
+            confidenceScore: functionName !== "unknown" ? 35 : 0,
+            badgeText: "Solicitante desconocido",
+            detailText: "Plugin: unknown | Proceso: " + functionName,
+            callerDescription: "Plugin: unknown | Proceso: " + functionName
         };
     }
 
@@ -1183,25 +1240,25 @@ class VaultGuardPlugin extends obsidian.Plugin {
         if (this.app.fileManager && this.app.fileManager.promptDelete) {
             this.originalPromptDelete = this.app.fileManager.promptDelete.bind(this.app.fileManager);
             this.app.fileManager.promptDelete = function (file) {
-                return self.interceptDeletion(file, () => self.originalTrash(file, true));
+                return self.interceptDeletion(file, () => self.originalPromptDelete(file), { entryPoint: "fileManager.promptDelete", stack: new Error().stack || "" });
             };
         }
 
         if (this.app.fileManager && this.app.fileManager.trashFile) {
             this.originalTrashFile = this.app.fileManager.trashFile.bind(this.app.fileManager);
             this.app.fileManager.trashFile = function (file) {
-                return self.interceptDeletion(file, () => self.originalTrashFile(file));
+                return self.interceptDeletion(file, () => self.originalTrashFile(file), { entryPoint: "fileManager.trashFile", stack: new Error().stack || "" });
             };
         }
 
         // Intercept app.vault.delete
         this.app.vault.delete = function (file, force) {
-            return self.interceptDeletion(file, () => self.originalDelete(file, force));
+            return self.interceptDeletion(file, () => self.originalDelete(file, force), { entryPoint: "vault.delete", stack: new Error().stack || "" });
         };
 
         // Intercept app.vault.trash
         this.app.vault.trash = function (file, systemTrash) {
-            return self.interceptDeletion(file, () => self.originalTrash(file, systemTrash));
+            return self.interceptDeletion(file, () => self.originalTrash(file, systemTrash), { entryPoint: "vault.trash", stack: new Error().stack || "" });
         };
     }
 
@@ -1221,7 +1278,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
     }
 
     // Central deletion interceptor: Applies protection strictly to formats listed by user in settings (Default: "md") and folders!
-    interceptDeletion(file, proceedCallback) {
+    interceptDeletion(file, proceedCallback, evidence) {
         const descriptor = this.getEntityDescriptor(file);
         const filePath = descriptor.path;
 
@@ -1249,20 +1306,22 @@ class VaultGuardPlugin extends obsidian.Plugin {
             return proceedCallback();
         }
 
+        // Capture attribution synchronously: the promise queue loses the original plugin call stack.
+        const caller = this.detectCallerInfo(file, evidence);
+
         // GUARANTEED SEQUENTIAL QUEUE: Chain every deletion request so multiple files are prompted ONE BY ONE!
         const safeQueue = this.confirmationQueue.catch(() => {});
 
         const nextPromise = safeQueue.then(() => {
-            return new Promise(async (resolve) => {
+            return new Promise(async (resolve, reject) => {
+                let originalOperationStarted = false;
                 try {
-                    const caller = this.detectCallerInfo(file);
-
                     // Capture links before deleting
                     this.captureLinksForFile(file);
 
                     // Early warning notice if a third-party plugin or background process requested deletion (Strict Semantic Output!)
                     const targetName = descriptor.name || "unknown";
-                    if (caller.isPlugin && caller.pluginId && caller.pluginId !== "unknown" && caller.pluginId !== "Proceso de Inicio / Segundo plano") {
+                    if (caller.isPlugin && caller.pluginId && caller.pluginId !== "unknown") {
                         new obsidian.Notice(`[Vault Guard] '${caller.pluginId}' solicitó eliminar ${descriptor.article.toLowerCase()} ${descriptor.noun} '${targetName}'.`);
                     }
 
@@ -1273,16 +1332,15 @@ class VaultGuardPlugin extends obsidian.Plugin {
                         allowed = await this.promptPluginFolderDeletionModal(caller, file);
                     }
                     // 2. Third-Party Plugin Deletion Protection
-                    else if (caller.isPlugin && caller.pluginId && caller.pluginId !== "unknown" && caller.pluginId !== "Proceso de Inicio / Segundo plano") {
+                    else if (caller.isPlugin && caller.pluginId && caller.pluginId !== "unknown") {
                         allowed = await this.promptPluginDeletionModal(caller, file);
                     }
                     // 3. Total Guard Protection (Enabled by default)
                     else if (this.settings.totalGuard) {
                         allowed = await this.promptTotalGuardConfirmModal(file, caller);
-                    } else if (this.settings.confirmBeforeDelete) {
-                        allowed = await this.promptConfirmDeleteModal(file, caller, true);
                     } else {
-                        allowed = true;
+                        // Every protected deletion remains confirmable, even when the requester is unknown.
+                        allowed = await this.promptConfirmDeleteModal(file, caller, true);
                     }
 
                     if (!allowed) {
@@ -1295,6 +1353,10 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     // Execute proceedCallback with re-entrancy guard enabled!
                     try {
                         this.isExecutingBypassedDeletion = true;
+                        if (file && file.path) {
+                            this.deletionAttributions.set(file.path, { caller, expiresAt: Date.now() + 10000 });
+                        }
+                        originalOperationStarted = true;
                         const result = await proceedCallback();
                         resolve(result);
                     } finally {
@@ -1304,7 +1366,12 @@ class VaultGuardPlugin extends obsidian.Plugin {
                     if (file && file.path) {
                         this.capturedLinksMap.delete(file.path);
                     }
-                    resolve(false);
+                    if (originalOperationStarted) {
+                        reject(err);
+                    } else {
+                        console.error("Vault Guard no pudo completar la confirmación:", err);
+                        resolve(false);
+                    }
                 } finally {
                     // Closure memory cleanup: release TFile references
                     file = null;
@@ -1396,6 +1463,29 @@ class VaultGuardPlugin extends obsidian.Plugin {
         });
     }
 
+    getDeletionAttribution(filePath) {
+        if (!this.deletionAttributions || !filePath) return null;
+        const now = Date.now();
+        let bestMatch = null;
+        let bestPath = "";
+
+        for (const [attributedPath, entry] of this.deletionAttributions.entries()) {
+            if (!entry || entry.expiresAt < now) {
+                this.deletionAttributions.delete(attributedPath);
+                continue;
+            }
+            if (filePath === attributedPath || filePath.startsWith(attributedPath + "/")) {
+                if (attributedPath.length > bestPath.length) {
+                    bestPath = attributedPath;
+                    bestMatch = entry.caller;
+                }
+            }
+        }
+
+        if (bestMatch && filePath === bestPath) this.deletionAttributions.delete(bestPath);
+        return bestMatch;
+    }
+
     // Process deleted file event for log tracking & Notice notification (Guaranteed Native Semantic Notice Output!)
     async handleFileDeleted(file) {
         try {
@@ -1412,7 +1502,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
             // Protection and history logging strictly applies ONLY to folders or files with protected extensions!
             if (!isFolder && !this.isProtectedExtension(descriptor.ext)) return;
 
-            const caller = this.detectCallerInfo(file);
+            const caller = this.getDeletionAttribution(filePath) || this.detectCallerInfo(file);
             const fileName = descriptor.name;
             const capturedLinks = (file && file.path) ? (this.capturedLinksMap.get(file.path) || []) : [];
             if (file && file.path) {
@@ -1449,7 +1539,7 @@ class VaultGuardPlugin extends obsidian.Plugin {
 
             if (this.settings.notifyOnDelete) {
                 let noticeText = descriptor.deletedLabel;
-                if (caller.isPlugin && caller.pluginId && caller.pluginId !== "unknown" && caller.pluginId !== "Proceso de Inicio / Segundo plano") {
+                if (caller.isPlugin && caller.pluginId && caller.pluginId !== "unknown") {
                     noticeText = `[Vault Guard] '${caller.pluginId}' eliminó ${descriptor.article.toLowerCase()} ${descriptor.noun} '${fileName}'.`;
                 }
                 new obsidian.Notice(noticeText);
@@ -2835,32 +2925,36 @@ class VaultGuardView extends obsidian.ItemView {
 
 // Modal Helper: Renders explicit Solicitante Box with robust fallback defaults (unknown / --)
 function renderSolicitanteBox(parentEl, caller) {
-    const isPlugin = caller && caller.isPlugin;
-    const pluginId = (caller && caller.pluginId && caller.pluginId !== "unknown") ? caller.pluginId : (isPlugin ? "Proceso de Inicio / Segundo plano" : "unknown");
-    const fnName = (caller && caller.functionName) ? caller.functionName : "--";
-    const location = (caller && caller.location) ? caller.location : "--";
-    const confidence = caller && caller.confidenceScore ? `${caller.confidenceScore}%` : "100%";
+    const requesterType = caller && caller.requesterType ? caller.requesterType : (caller && !caller.isPlugin ? "user" : "unknown");
+    const isUser = requesterType === "user";
+    const pluginId = caller && caller.pluginId && caller.pluginId !== "--" ? caller.pluginId : "unknown";
+    const pluginName = caller && caller.pluginName && caller.pluginName !== "unknown" ? caller.pluginName : pluginId;
+    const fnName = caller && caller.functionName && caller.functionName !== "--" ? caller.functionName : "unknown";
+    const location = caller && caller.location && caller.location !== "--" ? caller.location : "unknown";
+    const confidence = caller && Number.isFinite(caller.confidenceScore) ? caller.confidenceScore + "%" : "0%";
 
     const solicitanteBox = parentEl.createDiv({
-        cls: `vg-modal-solicitante-box ${isPlugin ? "vg-solicitante-plugin" : "vg-solicitante-user"}`
+        cls: "vg-modal-solicitante-box " + (isUser ? "vg-solicitante-user" : "vg-solicitante-plugin")
     });
 
     const solHeader = solicitanteBox.createDiv({ cls: "vg-modal-solicitante-header" });
     solHeader.createDiv({ cls: "vg-modal-label", text: "Solicitante de la eliminación:" });
-
     const solVal = solHeader.createDiv({
-        cls: `vg-modal-solicitante-value ${isPlugin ? "vg-val-plugin" : "vg-val-user"}`
+        cls: "vg-modal-solicitante-value " + (isUser ? "vg-val-user" : "vg-val-plugin")
     });
 
-    if (isPlugin) {
-        solVal.setText(pluginId.startsWith("Plugin:") ? pluginId : `Plugin / Proceso: ${pluginId}`);
-        if (fnName !== "--" || location !== "--") {
-            const procDiv = solicitanteBox.createDiv({ cls: "vg-modal-caller-process" });
-            procDiv.setText(`Proceso: ${fnName} | Ubicación: ${location} | Certeza: ${confidence}`);
-        }
-    } else {
-        solVal.setText(`Usuario (Acción manual desde la UI de Obsidian / Menú contextual) [Certeza: ${confidence}]`);
+    if (isUser) {
+        solVal.setText("Usuario (clic derecho sobre archivo/carpeta → Eliminar) [Certeza: " + confidence + "]");
+        return;
     }
+
+    const pluginLabel = pluginName !== "unknown" && pluginName !== pluginId
+        ? pluginName + " (" + pluginId + ")"
+        : pluginId;
+    solVal.setText("Plugin: " + pluginLabel);
+
+    const procDiv = solicitanteBox.createDiv({ cls: "vg-modal-caller-process" });
+    procDiv.setText("Proceso: " + fnName + " | Ubicación: " + location + " | Certeza: " + confidence);
 }
 
 // Modal: Git Date Picker Modal (Inspired by r-calendar)
@@ -3089,7 +3183,7 @@ class PluginFolderDeleteModal extends obsidian.Modal {
 
             const folderName = (this.folder && this.folder.name) ? this.folder.name : (this.folder && this.folder.path ? this.folder.path : "unknown");
             const folderPath = (this.folder && this.folder.path) ? this.folder.path : "--";
-            const pluginId = (this.caller && this.caller.pluginId && this.caller.pluginId !== "unknown") ? this.caller.pluginId : "Proceso de Inicio / Segundo plano";
+            const pluginId = (this.caller && this.caller.pluginId && this.caller.pluginId !== "unknown") ? this.caller.pluginId : "unknown";
 
             contentEl.createEl("h3", { text: "Alerta de Seguridad: Proceso Intentó Eliminar una Carpeta Completa" });
 
@@ -3161,7 +3255,7 @@ class PluginDeleteModal extends obsidian.Modal {
             contentEl.addClass("vg-modal-confirm");
 
             const descriptor = app.plugins.getPlugin("vault-guard").getEntityDescriptor(this.file);
-            const pluginId = (this.caller && this.caller.pluginId && this.caller.pluginId !== "unknown") ? this.caller.pluginId : "Proceso de Inicio / Segundo plano";
+            const pluginId = (this.caller && this.caller.pluginId && this.caller.pluginId !== "unknown") ? this.caller.pluginId : "unknown";
 
             contentEl.createEl("h3", { text: `Alerta: Intento de Eliminación de ${descriptor.noun.toUpperCase()}` });
 
